@@ -179,7 +179,7 @@ void ODBC::UV_AfterCreateConnection(uv_work_t* req, int status) {
     info[0] = Nan::New<External>((void*)(intptr_t)data->dbo->m_hEnv);
     info[1] = Nan::New<External>((void*)(intptr_t)data->hDBC);
     
-    Local<Object> js_result = Nan::New<Function>(ODBCConnection::constructor)->NewInstance(2, info);
+    Local<Object> js_result = NewInstance(ODBCConnection::constructor, 2, info);
 
     info[0] = Nan::Null();
     info[1] = js_result;
@@ -222,7 +222,7 @@ NAN_METHOD(ODBC::CreateConnectionSync) {
   params[0] = Nan::New<External>((void*)(intptr_t)dbo->m_hEnv);
   params[1] = Nan::New<External>((void*)(intptr_t)hDBC);
 
-  Local<Object> js_result = Nan::New<Function>(ODBCConnection::constructor)->NewInstance(2, params);
+  Local<Object> js_result = NewInstance(ODBCConnection::constructor, 2, params);
 
   info.GetReturnValue().Set(js_result);
 }

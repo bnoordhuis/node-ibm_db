@@ -214,7 +214,7 @@ void ODBCStatement::UV_AfterExecute(uv_work_t* req, int status) {
     info[2] = Nan::New<External>((void*) (intptr_t) stmt->m_hSTMT);
     info[3] = Nan::New<External>((void*)canFreeHandle);
     
-    Local<Object> js_result = Nan::New<Function>(ODBCResult::constructor)->NewInstance(4, info);
+    Local<Object> js_result = NewInstance(ODBCResult::constructor, 4, info);
 
     info[0] = Nan::Null();
     info[1] = js_result;
@@ -286,7 +286,7 @@ NAN_METHOD(ODBCStatement::ExecuteSync) {
     result[2] = Nan::New<External>((void*) (intptr_t) stmt->m_hSTMT);
     result[3] = Nan::New<External>((void*)canFreeHandle);
     
-    Local<Object> js_result = Nan::New(ODBCResult::constructor)->NewInstance(4, result);
+    Local<Object> js_result = NewInstance(ODBCResult::constructor, 4, result);
 
     if( outParamCount ) // Its a CALL stmt with OUT params.
     {   // Return an array with outparams as second element. [result, outparams]
@@ -528,7 +528,7 @@ void ODBCStatement::UV_AfterExecuteDirect(uv_work_t* req, int status) {
     
     //TODO persistent leak?
     Nan::Persistent<Object> js_result;
-    js_result.Reset(Nan::New<Function>(ODBCResult::constructor)->NewInstance(4, info));
+    js_result.Reset(NewInstance(ODBCResult::constructor, 4, info));
 
     info[0] = Nan::Null();
     info[1] = Nan::New(js_result);
@@ -593,7 +593,7 @@ NAN_METHOD(ODBCStatement::ExecuteDirectSync) {
     
     //TODO persistent leak?
     Nan::Persistent<Object> js_result;
-    js_result.Reset(Nan::New<Function>(ODBCResult::constructor)->NewInstance(4, result));
+    js_result.Reset(NewInstance(ODBCResult::constructor, 4, result));
     
     info.GetReturnValue().Set(Nan::New(js_result));
   }

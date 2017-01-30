@@ -518,7 +518,7 @@ NAN_METHOD(ODBCConnection::CreateStatementSync) {
   params[1] = Nan::New<External>((void*)(intptr_t)conn->m_hDBC);
   params[2] = Nan::New<External>((void*)(intptr_t)hSTMT);
   
-  Local<Object> js_result(Nan::New<Function>(ODBCStatement::constructor)->NewInstance(3, params));
+  Local<Object> js_result = NewInstance(ODBCStatement::constructor, 3, params);
   
   info.GetReturnValue().Set(js_result);
 }
@@ -602,7 +602,7 @@ void ODBCConnection::UV_AfterCreateStatement(uv_work_t* req, int status) {
   info[1] = Nan::New<External>((void*)(intptr_t)data->conn->m_hDBC);
   info[2] = Nan::New<External>((void*)(intptr_t)data->hSTMT);
   
-  Local<Object> js_result = Nan::New<Function>(ODBCStatement::constructor)->NewInstance(3, info);
+  Local<Object> js_result = NewInstance(ODBCStatement::constructor, 3, info);
 
   info[0] = Nan::Null();
   info[1] = js_result;
@@ -847,7 +847,7 @@ void ODBCConnection::UV_AfterQuery(uv_work_t* req, int status) {
     info[2] = Nan::New<External>((void*)(intptr_t)data->hSTMT);
     info[3] = Nan::New<External>((void*)canFreeHandle);
     
-    Local<Object> js_result = Nan::New<Function>(ODBCResult::constructor)->NewInstance(4, info);
+    Local<Object> js_result = NewInstance(ODBCResult::constructor, 4, info);
 
     // Check now to see if there was an error (as there may be further result sets)
     if (data->result == SQL_ERROR) {
@@ -1078,7 +1078,7 @@ NAN_METHOD(ODBCConnection::QuerySync) {
     result[2] = Nan::New<External>((void*) (intptr_t) hSTMT);
     result[3] = Nan::New<External>((void*)canFreeHandle);
     
-    Local<Object> js_result = Nan::New<Function>(ODBCResult::constructor)->NewInstance(4, result);
+    Local<Object> js_result = NewInstance(ODBCResult::constructor, 4, result);
 
     if( outParamCount ) // Its a CALL stmt with OUT params.
     { // Return an array with outparams as second element. [result, outparams]

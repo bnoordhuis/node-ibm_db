@@ -270,4 +270,15 @@ struct query_request {
                 Nan::New<Number>(constant),                               \
                 static_cast<v8::PropertyAttribute>(v8::ReadOnly|v8::DontDelete))
 
+namespace {
+
+inline v8::Local<v8::Object>
+NewInstance(const Nan::Persistent<v8::Function>& constructor,
+            int argc, v8::Local<v8::Value> argv[]) {
+  v8::Local<v8::Function> f = Nan::New<v8::Function>(constructor);
+  return Nan::NewInstance(f, argc, argv).ToLocalChecked();
+}
+
+}  // namespace anonymous
+
 #endif

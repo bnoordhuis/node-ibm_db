@@ -136,7 +136,7 @@ NAN_GETTER(ODBCResult::FetchModeGetter) {
 
   ODBCResult *obj = Nan::ObjectWrap::Unwrap<ODBCResult>(info.Holder());
 
-  info.GetReturnValue().Set(Nan::New(obj->m_fetchMode));
+  info.GetReturnValue().Set(obj->m_fetchMode);
 }
 
 NAN_SETTER(ODBCResult::FetchModeSetter) {
@@ -201,7 +201,7 @@ NAN_METHOD(ODBCResult::Fetch) {
 
   objODBCResult->Ref();
 
-  info.GetReturnValue().Set(Nan::Undefined());
+  info.GetReturnValue().SetUndefined();
 }
 
 void ODBCResult::UV_Fetch(uv_work_t* work_req) {
@@ -393,12 +393,9 @@ NAN_METHOD(ODBCResult::FetchSync) {
     //if there was an error, pass that as arg[0] otherwise Null
     if (error) {
       Nan::ThrowError(objError);
-      
-      info.GetReturnValue().Set(Nan::Null());
     }
-    else {
-      info.GetReturnValue().Set(Nan::Null());
-    }
+
+    info.GetReturnValue().SetNull();
   }
 }
 
@@ -456,7 +453,7 @@ NAN_METHOD(ODBCResult::FetchAll) {
 
   data->objResult->Ref();
 
-  info.GetReturnValue().Set(Nan::Undefined());
+  info.GetReturnValue().SetUndefined();
 }
 
 void ODBCResult::UV_FetchAll(uv_work_t* work_req) {
@@ -699,7 +696,7 @@ NAN_METHOD(ODBCResult::CloseSync) {
     result->m_canFreeHandle = new bool(true);
   }
   
-  info.GetReturnValue().Set(Nan::True());
+  info.GetReturnValue().Set(true);
   DEBUG_PRINTF("ODBCResult::CloseSync() Done.\n");
 }
 
@@ -715,7 +712,7 @@ NAN_METHOD(ODBCResult::MoreResultsSync) {
     Nan::ThrowError(ODBC::GetSQLError(SQL_HANDLE_STMT, result->m_hSTMT, (char *)"[node-odbc] Error in ODBCResult::MoreResultsSync"));
   }
 
-  info.GetReturnValue().Set(SQL_SUCCEEDED(ret) || ret == SQL_ERROR ? Nan::True() : Nan::False());
+  info.GetReturnValue().Set(SQL_SUCCEEDED(ret) || ret == SQL_ERROR);
 }
 
 /*

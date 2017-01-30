@@ -160,7 +160,7 @@ NAN_METHOD(ODBCStatement::Execute) {
 
   stmt->Ref();
 
-  info.GetReturnValue().Set(Nan::Undefined());
+  info.GetReturnValue().SetUndefined();
 }
 
 void ODBCStatement::UV_Execute(uv_work_t* req) {
@@ -275,7 +275,7 @@ NAN_METHOD(ODBCStatement::ExecuteSync) {
       (char *) "[node-odbc] Error in ODBCStatement::ExecuteSync"
     ));
     
-    info.GetReturnValue().Set(Nan::Null());
+    info.GetReturnValue().SetNull();
   }
   else {
     Local<Value> result[4];
@@ -333,7 +333,7 @@ NAN_METHOD(ODBCStatement::ExecuteNonQuery) {
 
   stmt->Ref();
   
-  info.GetReturnValue().Set(Nan::Undefined());
+  info.GetReturnValue().SetUndefined();
 }
 
 void ODBCStatement::UV_ExecuteNonQuery(uv_work_t* req) {
@@ -418,7 +418,7 @@ NAN_METHOD(ODBCStatement::ExecuteNonQuerySync) {
       (char *) "[node-odbc] Error in ODBCStatement::ExecuteSync"
     ));
     
-    info.GetReturnValue().Set(Nan::Null());
+    info.GetReturnValue().SetNull();
   }
   else {
     SQLLEN rowCount = 0;
@@ -431,7 +431,7 @@ NAN_METHOD(ODBCStatement::ExecuteNonQuerySync) {
     
     SQLFreeStmt(stmt->m_hSTMT, SQL_CLOSE);
     
-    info.GetReturnValue().Set(Nan::New<Number>(rowCount));
+    info.GetReturnValue().Set(rowCount);
   }
 }
 
@@ -482,7 +482,7 @@ NAN_METHOD(ODBCStatement::ExecuteDirect) {
 
   stmt->Ref();
 
-  info.GetReturnValue().Set(Nan::Undefined());
+  info.GetReturnValue().SetUndefined();
 }
 
 void ODBCStatement::UV_ExecuteDirect(uv_work_t* req) {
@@ -580,7 +580,7 @@ NAN_METHOD(ODBCStatement::ExecuteDirectSync) {
       (char *) "[node-odbc] Error in ODBCStatement::ExecuteDirectSync"
     ));
     
-    info.GetReturnValue().Set(Nan::Null());
+    info.GetReturnValue().SetNull();
   }
   else {
    Local<Value> result[4];
@@ -596,7 +596,6 @@ NAN_METHOD(ODBCStatement::ExecuteDirectSync) {
     js_result.Reset(Nan::New<Function>(ODBCResult::constructor)->NewInstance(4, result));
     
     info.GetReturnValue().Set(Nan::New(js_result));
-	//info.GetReturnValue().Set(Nan::Null());
   }
 }
 
@@ -636,7 +635,7 @@ NAN_METHOD(ODBCStatement::PrepareSync) {
     sqlLen);
   
   if (SQL_SUCCEEDED(ret)) {
-    info.GetReturnValue().Set(Nan::True());
+    info.GetReturnValue().Set(true);
   }
   else {
     Nan::ThrowError(ODBC::GetSQLError(
@@ -645,7 +644,7 @@ NAN_METHOD(ODBCStatement::PrepareSync) {
       (char *) "[node-odbc] Error in ODBCStatement::PrepareSync"
     ));
 
-    info.GetReturnValue().Set(Nan::False());
+    info.GetReturnValue().Set(false);
   }
 }
 
@@ -697,7 +696,7 @@ NAN_METHOD(ODBCStatement::Prepare) {
 
   stmt->Ref();
 
-  info.GetReturnValue().Set(Nan::Undefined());
+  info.GetReturnValue().SetUndefined();
 }
 
 void ODBCStatement::UV_Prepare(uv_work_t* req) {
@@ -800,7 +799,7 @@ NAN_METHOD(ODBCStatement::BindSync)
   ret = ODBC::BindParameters( stmt->m_hSTMT, stmt->params, stmt->paramCount ) ;
 
   if (SQL_SUCCEEDED(ret)) {
-    info.GetReturnValue().Set(Nan::True());
+    info.GetReturnValue().Set(true);
   }
   else {
     Nan::ThrowError(ODBC::GetSQLError(
@@ -809,10 +808,8 @@ NAN_METHOD(ODBCStatement::BindSync)
       (char *) "[node-odbc] Error in ODBCStatement::BindSync"
     ));
     
-    info.GetReturnValue().Set(Nan::False());
+    info.GetReturnValue().Set(false);
   }
-
-  //info.GetReturnValue().Set(Nan::Undefined());
 }
 
 /*
@@ -870,7 +867,7 @@ NAN_METHOD(ODBCStatement::Bind) {
 
   stmt->Ref();
 
-  info.GetReturnValue().Set(Nan::Undefined());
+  info.GetReturnValue().SetUndefined();
 }
 
 void ODBCStatement::UV_Bind(uv_work_t* req) {
@@ -950,5 +947,5 @@ NAN_METHOD(ODBCStatement::CloseSync) {
     SQLFreeStmt(stmt->m_hSTMT, closeOption);
   }
 
-  info.GetReturnValue().Set(Nan::True());
+  info.GetReturnValue().Set(true);
 }

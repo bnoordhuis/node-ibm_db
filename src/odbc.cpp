@@ -146,7 +146,7 @@ NAN_METHOD(ODBC::CreateConnection) {
 
   dbo->Ref();
 
-  info.GetReturnValue().Set(Nan::Undefined());
+  info.GetReturnValue().SetUndefined();
 }
 
 void ODBC::UV_CreateConnection(uv_work_t* req) {

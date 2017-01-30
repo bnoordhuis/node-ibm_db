@@ -125,7 +125,7 @@ NAN_GETTER(ODBCConnection::ConnectedGetter) {
 
   ODBCConnection *obj = Nan::ObjectWrap::Unwrap<ODBCConnection>(info.Holder());
 
-  info.GetReturnValue().Set(obj->connected ? Nan::True() : Nan::False());
+  info.GetReturnValue().Set(obj->connected);
 }
 
 NAN_GETTER(ODBCConnection::ConnectTimeoutGetter) {
@@ -133,7 +133,7 @@ NAN_GETTER(ODBCConnection::ConnectTimeoutGetter) {
 
   ODBCConnection *obj = Nan::ObjectWrap::Unwrap<ODBCConnection>(info.Holder());
 
-  info.GetReturnValue().Set(Nan::New<Number>(obj->connectTimeout));
+  info.GetReturnValue().Set(obj->connectTimeout);
 }
 
 NAN_SETTER(ODBCConnection::ConnectTimeoutSetter) {
@@ -388,7 +388,7 @@ NAN_METHOD(ODBCConnection::OpenSync) {
     return Nan::ThrowError(objError);
   }
   else {
-    info.GetReturnValue().Set(Nan::True());
+    info.GetReturnValue().Set(true);
   }
 }
 
@@ -425,7 +425,7 @@ NAN_METHOD(ODBCConnection::Close) {
 
   conn->Ref();
 
-  info.GetReturnValue().Set(Nan::Undefined());
+  info.GetReturnValue().SetUndefined();
 }
 
 void ODBCConnection::UV_Close(uv_work_t* req) {
@@ -492,7 +492,7 @@ NAN_METHOD(ODBCConnection::CloseSync) {
   
   conn->connected = false;
 
-  info.GetReturnValue().Set(Nan::True());
+  info.GetReturnValue().Set(true);
 }
 
 /*
@@ -558,7 +558,7 @@ NAN_METHOD(ODBCConnection::CreateStatement) {
 
   conn->Ref();
 
-  info.GetReturnValue().Set(Nan::Undefined());
+  info.GetReturnValue().SetUndefined();
 }
 
 void ODBCConnection::UV_CreateStatement(uv_work_t* req) {
@@ -753,8 +753,7 @@ NAN_METHOD(ODBCConnection::Query) {
 
   conn->Ref();
 
-  info.GetReturnValue().Set(Nan::Undefined());
-  DEBUG_PRINTF("ODBCConnection::Query done for hDBC=%X\n", data->conn->m_hDBC);
+  info.GetReturnValue().SetUndefined();
 }
 
 void ODBCConnection::UV_Query(uv_work_t* req) {
@@ -1067,7 +1066,7 @@ NAN_METHOD(ODBCConnection::QuerySync) {
       resultset->Set(1, sp_result);
       info.GetReturnValue().Set(resultset);
     } else {
-      info.GetReturnValue().Set(Nan::Null());
+      info.GetReturnValue().SetNull();
     }
   }
   else {
@@ -1182,7 +1181,7 @@ NAN_METHOD(ODBCConnection::Tables) {
 
   conn->Ref();
 
-  info.GetReturnValue().Set(Nan::Undefined());
+  info.GetReturnValue().SetUndefined();
 }
 
 void ODBCConnection::UV_Tables(uv_work_t* req) {
@@ -1293,7 +1292,7 @@ NAN_METHOD(ODBCConnection::Columns) {
   
   conn->Ref();
 
-  info.GetReturnValue().Set(Nan::Undefined());
+  info.GetReturnValue().SetUndefined();
 }
 
 void ODBCConnection::UV_Columns(uv_work_t* req) {
@@ -1338,10 +1337,10 @@ NAN_METHOD(ODBCConnection::BeginTransactionSync) {
     
     Nan::ThrowError(objError);
     
-    info.GetReturnValue().Set(Nan::False());
+    info.GetReturnValue().Set(false);
   }
   
-  info.GetReturnValue().Set(Nan::True());
+  info.GetReturnValue().Set(true);
 }
 
 /*
@@ -1489,10 +1488,10 @@ NAN_METHOD(ODBCConnection::EndTransactionSync) {
   if (error) {
     Nan::ThrowError(objError);
     
-    info.GetReturnValue().Set(Nan::False());
+    info.GetReturnValue().Set(false);
   }
   else {
-    info.GetReturnValue().Set(Nan::True());
+    info.GetReturnValue().Set(true);
   }
 }
 
@@ -1531,7 +1530,7 @@ NAN_METHOD(ODBCConnection::EndTransaction) {
     UV_EndTransaction, 
     (uv_after_work_cb)UV_AfterEndTransaction);
 
-  info.GetReturnValue().Set(Nan::Undefined());
+  info.GetReturnValue().SetUndefined();
 }
 
 /*
@@ -1647,9 +1646,9 @@ NAN_METHOD(ODBCConnection::SetIsolationLevel) {
   if (error) {
     Nan::ThrowError(objError);
 
-    info.GetReturnValue().Set(Nan::False());
+    info.GetReturnValue().Set(false);
   }
   else {
-    info.GetReturnValue().Set(Nan::True());
+    info.GetReturnValue().Set(true);
   }
 }

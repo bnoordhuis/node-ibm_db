@@ -97,7 +97,6 @@ class ODBC : public Nan::ObjectWrap {
   public:
     static Nan::Persistent<Function> constructor;
     static uv_mutex_t g_odbcMutex;
-    static uv_async_t g_async;
     
     static void Init(v8::Handle<Object> exports);
     static Column* GetColumns(SQLHSTMT hStmt, short* colCount);
@@ -133,8 +132,6 @@ class ODBC : public Nan::ObjectWrap {
     static NAN_METHOD(CreateConnection);
     static void UV_CreateConnection(uv_work_t* work_req);
     static void UV_AfterCreateConnection(uv_work_t* work_req, int status);
-    
-    static void WatcherCallback(uv_async_t* w, int revents);
     
     //sync methods
     static NAN_METHOD(CreateConnectionSync);

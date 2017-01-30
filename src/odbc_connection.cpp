@@ -266,13 +266,6 @@ void ODBCConnection::UV_AfterOpen(uv_work_t* req, int status) {
 
   if (!err) {
    data->conn->self()->connected = true;
-    
-    //only uv_ref if the connection was successful
-//#if NODE_VERSION_AT_LEAST(0, 7, 9)
-//    uv_ref((uv_handle_t *)&ODBC::g_async);
-//#else
-//    uv_ref(uv_default_loop());
-//#endif
   }
 
   Nan::TryCatch try_catch;
@@ -387,13 +380,6 @@ NAN_METHOD(ODBCConnection::OpenSync) {
     hStmt = (SQLHSTMT)NULL;
     
     conn->self()->connected = true;
-    
-    //only uv_ref if the connection was successful
-    /*#if NODE_VERSION_AT_LEAST(0, 7, 9)
-      uv_ref((uv_handle_t *)&ODBC::g_async);
-    #else
-      uv_ref(uv_default_loop());
-    #endif*/
   }
 
   free(connectionString);
@@ -472,13 +458,6 @@ void ODBCConnection::UV_AfterClose(uv_work_t* req, int status) {
   }
   else {
     conn->connected = false;
-    
-    //only unref if the connection was closed
-//#if NODE_VERSION_AT_LEAST(0, 7, 9)
-//    uv_unref((uv_handle_t *)&ODBC::g_async);
-//#else
-//    uv_unref(uv_default_loop());
-//#endif
   }
 
   Nan::TryCatch try_catch;
@@ -513,12 +492,6 @@ NAN_METHOD(ODBCConnection::CloseSync) {
   
   conn->connected = false;
 
-#if NODE_VERSION_AT_LEAST(0, 7, 9)
-  uv_unref((uv_handle_t *)&ODBC::g_async);
-#else
-  uv_unref(uv_default_loop());
-#endif
-  
   info.GetReturnValue().Set(Nan::True());
 }
 

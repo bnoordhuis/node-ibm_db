@@ -20,8 +20,6 @@
 
 #include <nan.h>
 
-#define DEFAULT_CONNECTION_TIMEOUT 30
-
 class ODBCConnection : public Nan::ObjectWrap {
   public:
    static Nan::Persistent<String> OPTION_SQL;
@@ -53,25 +51,15 @@ class ODBCConnection : public Nan::ObjectWrap {
 
     //async methods
     static NAN_METHOD(BeginTransaction);
-    static void UV_BeginTransaction(uv_work_t* work_req);
-    static void UV_AfterBeginTransaction(uv_work_t* work_req, int status);
-    
+
     static NAN_METHOD(EndTransaction);
     static void UV_EndTransaction(uv_work_t* work_req);
     static void UV_AfterEndTransaction(uv_work_t* work_req, int status);
     
+    
     static NAN_METHOD(Open);
-    static void UV_Open(uv_work_t* work_req);
-    static void UV_AfterOpen(uv_work_t* work_req, int status);
-    static void SetConnectionTimeOut( SQLHDBC hDBC, SQLUINTEGER timeOut );
-
     static NAN_METHOD(Close);
-    static void UV_Close(uv_work_t* work_req);
-    static void UV_AfterClose(uv_work_t* work_req, int status);
-
     static NAN_METHOD(CreateStatement);
-    static void UV_CreateStatement(uv_work_t* work_req);
-    static void UV_AfterCreateStatement(uv_work_t* work_req, int status);
 
     static NAN_METHOD(Query);
     static void UV_Query(uv_work_t* req);
@@ -92,22 +80,20 @@ class ODBCConnection : public Nan::ObjectWrap {
     static NAN_METHOD(BeginTransactionSync);
     static NAN_METHOD(EndTransactionSync);
     static NAN_METHOD(SetIsolationLevel);
-    
-    struct Fetch_Request {
-      Nan::Callback* callback;
-      ODBCConnection *objResult;
-      SQLRETURN result;
-    };
-    
+
     ODBCConnection *self(void) { return this; }
 
   protected:
+    friend struct BeginTransactionJob;
+    friend struct CloseJob;
+    friend struct CreateStatementJob;
+    friend struct OpenJob;
+
     SQLHENV m_hENV;
     SQLHDBC m_hDBC;
-    SQLUSMALLINT canHaveMoreResults;
     bool connected;
     int statements;
-    SQLUINTEGER connectTimeout;
+    int connectTimeout;
 };
 
 struct create_statement_work_data {

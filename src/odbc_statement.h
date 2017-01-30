@@ -18,6 +18,8 @@
 #define _SRC_ODBC_STATEMENT_H
 
 #include <nan.h>
+#include <uv.h>
+#include <v8.h>
 
 class ODBCStatement : public Nan::ObjectWrap {
   public:
@@ -41,26 +43,12 @@ class ODBCStatement : public Nan::ObjectWrap {
     static NAN_METHOD(New);
 
     //async methods
-    static NAN_METHOD(Execute);
-    static void UV_Execute(uv_work_t* work_req);
-    static void UV_AfterExecute(uv_work_t* work_req, int status);
-
-    static NAN_METHOD(ExecuteDirect);
-    static void UV_ExecuteDirect(uv_work_t* work_req);
-    static void UV_AfterExecuteDirect(uv_work_t* work_req, int status);
-
-    static NAN_METHOD(ExecuteNonQuery);
-    static void UV_ExecuteNonQuery(uv_work_t* work_req);
-    static void UV_AfterExecuteNonQuery(uv_work_t* work_req, int status);
-    
-    static NAN_METHOD(Prepare);
-    static void UV_Prepare(uv_work_t* work_req);
-    static void UV_AfterPrepare(uv_work_t* work_req, int status);
-    
     static NAN_METHOD(Bind);
-    static void UV_Bind(uv_work_t* work_req);
-    static void UV_AfterBind(uv_work_t* work_req, int status);
-    
+    static NAN_METHOD(Execute);
+    static NAN_METHOD(ExecuteDirect);
+    static NAN_METHOD(ExecuteNonQuery);
+    static NAN_METHOD(Prepare);
+
     //sync methods
     static NAN_METHOD(CloseSync);
     static NAN_METHOD(ExecuteSync);
@@ -68,16 +56,11 @@ class ODBCStatement : public Nan::ObjectWrap {
     static NAN_METHOD(ExecuteNonQuerySync);
     static NAN_METHOD(PrepareSync);
     static NAN_METHOD(BindSync);
-    
-    struct Fetch_Request {
-      Nan::Callback* callback;
-      ODBCStatement *objResult;
-      SQLRETURN result;
-    };
-    
-    ODBCStatement *self(void) { return this; }
 
   protected:
+    friend struct ExecuteJob;
+    friend bool CloneBindParams(const Nan::FunctionCallbackInfo<v8::Value>&);
+
     SQLHENV m_hENV;
     SQLHDBC m_hDBC;
     SQLHSTMT m_hSTMT;
@@ -89,34 +72,6 @@ class ODBCStatement : public Nan::ObjectWrap {
     int bufferLength;
     Column *columns;
     short colCount;
-};
-
-struct execute_direct_work_data {
-  Nan::Callback* cb;
-  ODBCStatement *stmt;
-  int result;
-  void *sql;
-  int sqlLen;
-};
-
-struct execute_work_data {
-  Nan::Callback* cb;
-  ODBCStatement *stmt;
-  int result;
-};
-
-struct prepare_work_data {
-  Nan::Callback* cb;
-  ODBCStatement *stmt;
-  int result;
-  void *sql;
-  int sqlLen;
-};
-
-struct bind_work_data {
-  Nan::Callback* cb;
-  ODBCStatement *stmt;
-  int result;
 };
 
 #endif

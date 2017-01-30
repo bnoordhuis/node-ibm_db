@@ -27,6 +27,10 @@
 #include "odbc_result.h"
 #include "odbc_statement.h"
 
+#include "async-job.h"
+
+#include <new>  // std::nothrow
+
 using namespace v8;
 using namespace node;
 
@@ -115,7 +119,7 @@ NAN_METHOD(ODBCConnection::New) {
   conn->Wrap(info.Holder());
   
   //set default connectTimeout to 30 seconds
-  conn->connectTimeout = DEFAULT_CONNECTION_TIMEOUT ;
+  conn->connectTimeout = 30;
   
   info.GetReturnValue().Set(info.Holder());
 }
@@ -146,481 +150,149 @@ NAN_SETTER(ODBCConnection::ConnectTimeoutSetter) {
   }
 }
 
-/*
- * Open
- * 
- */
+struct OpenJob : public Job<OpenJob, ODBCConnection> {
+  inline explicit OpenJob(v8::Local<v8::String> connection_string)
+      : connection_string(connection_string) {}
 
-//Handle<Value> ODBCConnection::Open(const Arguments& info) {
-NAN_METHOD(ODBCConnection::Open) {
-  DEBUG_PRINTF("ODBCConnection::Open\n");
-  Nan::HandleScope scope;
+  inline void Work(ODBCConnection* conn) {
+    if (conn->connectTimeout > 0) {
+      SQLUINTEGER timeout = conn->connectTimeout;
 
-  REQ_STRO_ARG(0, connection);
-  REQ_FUN_ARG(1, cb);
+      result =
+          SQLSetConnectAttr(conn->m_hDBC, SQL_ATTR_LOGIN_TIMEOUT,
+                            &timeout, sizeof(timeout));
 
-  //get reference to the connection object
-  ODBCConnection* conn = Nan::ObjectWrap::Unwrap<ODBCConnection>(info.Holder());
-  
-  //create a uv work request
-  uv_work_t* work_req = (uv_work_t *) (calloc(1, sizeof(uv_work_t)));
-  MEMCHECK( work_req ) ;
- 
-  //allocate our worker data
-  open_connection_work_data* data = (open_connection_work_data *) 
-    calloc(1, sizeof(open_connection_work_data));
-  MEMCHECK( data ) ;
+      if (!SQL_SUCCEEDED(result)) {
+        return RecordSQLError(SQL_HANDLE_DBC, conn->m_hDBC);
+      }
+    }
 
-  data->connectionLength = connection->Length() + 1;
+    result =
+        SQLDriverConnect(conn->m_hDBC, NULL,
+                         *connection_string, connection_string.length(),
+                         NULL, 0, NULL, SQL_DRIVER_NOPROMPT);
 
-  //copy the connection string to the work data  
-#ifdef UNICODE
-  data->connection = (uint16_t *) malloc(sizeof(uint16_t) * data->connectionLength);
-  MEMCHECK( data->connection ) ;
-  connection->Write((uint16_t*) data->connection);
+    if (!SQL_SUCCEEDED(result)) {
+      return RecordSQLError(SQL_HANDLE_DBC, conn->m_hDBC);
+    }
+
+    conn->connected = SQL_SUCCEEDED(result);
+  }
+
+  inline void Done(ODBCConnection* conn) {
+    if (SQL_SUCCEEDED(result)) {
+      MakeCallback();
+    } else {
+      MakeCallback(MakeSQLError());
+    }
+  }
+
+  inline void DoneSync(ODBCConnection* conn,
+                       const Nan::FunctionCallbackInfo<v8::Value>& info) {
+    if (SQL_SUCCEEDED(result)) {
+      info.GetReturnValue().Set(true);
+    } else {
+      Nan::ThrowError(MakeSQLError());
+    }
+  }
+
+#ifdef UNICODE  // FIXME(bnoordhuis) Retain std::nothrow behavior on OOM?
+  v8::String::Value connection_string;
 #else
-  data->connection = (char *) malloc(sizeof(char) * data->connectionLength);
-  MEMCHECK( data->connection ) ;
-  connection->WriteUtf8((char*) data->connection);
+  Nan::Utf8String connection_string;
 #endif
-  
-  data->cb = new Nan::Callback(cb);
-  data->conn = conn;
-  
-  work_req->data = data;
-  
-  //queue the work
-  uv_queue_work(uv_default_loop(), 
-    work_req, 
-    UV_Open, 
-    (uv_after_work_cb)UV_AfterOpen);
+  SQLRETURN result;
+};
 
-  conn->Ref();
-
-  info.GetReturnValue().Set(info.Holder());
+NAN_METHOD(ODBCConnection::Open) {
+  REQ_STRO_ARG(0, connection_string);
+  static const int kCallbackIndex = 1;
+  OpenJob* that = new(std::nothrow) OpenJob(connection_string);
+  OpenJob::Async(HERE, info, that, kCallbackIndex);
 }
-
-void ODBCConnection::UV_Open(uv_work_t* req) {
-  DEBUG_PRINTF("ODBCConnection::UV_Open\n");
-  open_connection_work_data* data = (open_connection_work_data *)(req->data);
-  
-  ODBCConnection* self = data->conn->self();
-
-  SetConnectionTimeOut(self->m_hDBC, self->connectTimeout);
-  
-  //Attempt to connect
-  //NOTE: SQLDriverConnect requires the thread to be locked
-  int ret = SQLDriverConnect(
-    self->m_hDBC,                   //ConnectionHandle
-    NULL,                           //WindowHandle
-    (SQLTCHAR*) data->connection,   //InConnectionString
-    data->connectionLength,         //StringLength1
-    NULL,                           //OutConnectionString
-    0,                              //BufferLength - in characters
-    NULL,                           //StringLength2Ptr
-    SQL_DRIVER_NOPROMPT);           //DriverCompletion
-  
-  
-  if (SQL_SUCCEEDED(ret)) {
-    SQLHSTMT hStmt;
-    
-    //allocate a temporary statment
-    ret = SQLAllocHandle(SQL_HANDLE_STMT, self->m_hDBC, &hStmt);
-    
-    //try to determine if the driver can handle
-    //multiple recordsets
-    ret = SQLGetFunctions(
-      self->m_hDBC,
-      SQL_API_SQLMORERESULTS, 
-      &self->canHaveMoreResults);
-
-    if (!SQL_SUCCEEDED(ret)) {
-      self->canHaveMoreResults = 0;
-    }
-    
-    //free the handle
-    ret = SQLFreeHandle( SQL_HANDLE_STMT, hStmt);
-    hStmt = (SQLHSTMT)NULL;
-  }
-
-  data->result = ret;
-}
-
-void ODBCConnection::UV_AfterOpen(uv_work_t* req, int status) {
-  DEBUG_PRINTF("ODBCConnection::UV_AfterOpen\n");
-  Nan::HandleScope scope;
-  
-  open_connection_work_data* data = (open_connection_work_data *)(req->data);
-  
-  Local<Value> argv[1];
-  
-  bool err = false;
-
-  if (data->result) {
-    err = true;
-
-    Local<Value> objError = ODBC::GetSQLError(SQL_HANDLE_DBC, data->conn->self()->m_hDBC);
-    
-    argv[0] = objError;
-  }
-
-  if (!err) {
-   data->conn->self()->connected = true;
-  }
-
-  Nan::TryCatch try_catch;
-
-  data->conn->Unref();
-  data->cb->Call(err ? 1 : 0, argv);
-
-  if (try_catch.HasCaught()) {
-    FatalException(try_catch);
-  }
-
-  delete data->cb;
-  
-  free(data->connection);
-  free(data);
-  free(req);
-}
-
-void ODBCConnection::SetConnectionTimeOut( SQLHDBC hDBC, SQLUINTEGER timeOut )
-{
-    SQLRETURN rc = SQL_SUCCESS;
-    DEBUG_PRINTF("ODBCConnection::SetConnectionTimeOut - timeOut = %i\n", timeOut);
-
-    if(timeOut < 0 || timeOut > 32767)
-    {
-        timeOut = DEFAULT_CONNECTION_TIMEOUT ;
-        DEBUG_PRINTF("ODBCConnection::SetConnectionTimeOut - Invalid connection timeout value changed to default.");
-    }
-    if (timeOut > 0)
-    {
-      //NOTE: SQLSetConnectAttr requires the thread to be locked
-      rc = SQLSetConnectAttr( hDBC,           //ConnectionHandle
-                              SQL_ATTR_LOGIN_TIMEOUT, //Attribute
-                              (SQLPOINTER)(intptr_t)timeOut,    //ValuePtr
-                              sizeof(timeOut));       //StringLength
-    }
-    if(rc != SQL_SUCCESS)
-    {
-        // We should not disallow connection if rc is not success, though it would never happen.
-        // So, ignore any rc and just log here the value for debug build.
-        DEBUG_PRINTF("ODBCConnection::SetConnectionTimeOut - rc = %i\n", rc);
-    }
-}
-
-/*
- * OpenSync
- */
 
 NAN_METHOD(ODBCConnection::OpenSync) {
-  DEBUG_PRINTF("ODBCConnection::OpenSync\n");
-  Nan::HandleScope scope;
-
-  REQ_STRO_ARG(0, connection);
-
-  //get reference to the connection object
-  ODBCConnection* conn = Nan::ObjectWrap::Unwrap<ODBCConnection>(info.Holder());
- 
-  Local<Value> objError;
-  SQLRETURN ret;
-  bool err = false;
-  
-  int connectionLength = connection->Length() + 1;
-  
-#ifdef UNICODE
-  uint16_t* connectionString = (uint16_t *) malloc(connectionLength * sizeof(uint16_t));
-  MEMCHECK( connectionString ) ;
-  connection->Write(connectionString);
-#else
-  char* connectionString = (char *) malloc(connectionLength);
-  MEMCHECK( connectionString ) ;
-  connection->WriteUtf8(connectionString);
-#endif
-  
-  SetConnectionTimeOut(conn->m_hDBC, conn->connectTimeout);
-  
-  //Attempt to connect
-  //NOTE: SQLDriverConnect requires the thread to be locked
-  ret = SQLDriverConnect(
-    conn->m_hDBC,                   //ConnectionHandle
-    NULL,                           //WindowHandle
-    (SQLTCHAR*) connectionString,   //InConnectionString
-    connectionLength,               //StringLength1
-    NULL,                           //OutConnectionString
-    0,                              //BufferLength - in characters
-    NULL,                           //StringLength2Ptr
-    SQL_DRIVER_NOPROMPT);           //DriverCompletion
-
-  if (!SQL_SUCCEEDED(ret)) {
-    err = true;
-    
-    objError = ODBC::GetSQLError(SQL_HANDLE_DBC, conn->self()->m_hDBC);
-  }
-  else {
-    SQLHSTMT hStmt;
-    
-    //allocate a temporary statment
-    ret = SQLAllocHandle(SQL_HANDLE_STMT, conn->m_hDBC, &hStmt);
-    
-    //try to determine if the driver can handle
-    //multiple recordsets
-    ret = SQLGetFunctions(
-      conn->m_hDBC,
-      SQL_API_SQLMORERESULTS, 
-      &conn->canHaveMoreResults);
-
-    if (!SQL_SUCCEEDED(ret)) {
-      conn->canHaveMoreResults = 0;
-    }
-  
-    //free the handle
-    ret = SQLFreeHandle( SQL_HANDLE_STMT, hStmt);
-    hStmt = (SQLHSTMT)NULL;
-    
-    conn->self()->connected = true;
-  }
-
-  free(connectionString);
-  
-  if (err) {
-    return Nan::ThrowError(objError);
-  }
-  else {
-    info.GetReturnValue().Set(true);
-  }
+  REQ_STRO_ARG(0, connection_string);
+  OpenJob that(connection_string);
+  OpenJob::Sync(HERE, info, &that);
 }
 
-/*
- * Close
- * 
- */
-
-NAN_METHOD(ODBCConnection::Close) {
-  DEBUG_PRINTF("ODBCConnection::Close\n");
-  Nan::HandleScope scope;
-
-  REQ_FUN_ARG(0, cb);
-
-  ODBCConnection* conn = Nan::ObjectWrap::Unwrap<ODBCConnection>(info.Holder());
-  
-  uv_work_t* work_req = (uv_work_t *) (calloc(1, sizeof(uv_work_t)));
-  MEMCHECK( work_req ) ;
-  
-  close_connection_work_data* data = (close_connection_work_data *) 
-    (calloc(1, sizeof(close_connection_work_data)));
-  MEMCHECK( data ) ;
-
-  data->cb = new Nan::Callback(cb);
-  data->conn = conn;
-
-  work_req->data = data;
-  
-  uv_queue_work(
-    uv_default_loop(),
-    work_req,
-    UV_Close,
-    (uv_after_work_cb)UV_AfterClose);
-
-  conn->Ref();
-
-  info.GetReturnValue().SetUndefined();
-}
-
-void ODBCConnection::UV_Close(uv_work_t* req) {
-  DEBUG_PRINTF("ODBCConnection::UV_Close\n");
-  close_connection_work_data* data = (close_connection_work_data *)(req->data);
-  ODBCConnection* conn = data->conn;
-  
-  //TODO: check to see if there are any open statements
-  //on this connection
-  
-  conn->Free();
-  conn->connected = false;
-  data->result = 0;
-}
-
-void ODBCConnection::UV_AfterClose(uv_work_t* req, int status) {
-  DEBUG_PRINTF("ODBCConnection::UV_AfterClose\n");
-  Nan::HandleScope scope;
-
-  close_connection_work_data* data = (close_connection_work_data *)(req->data);
-
-  ODBCConnection* conn = data->conn;
-  
-  Local<Value> argv[1];
-  bool err = false;
-  
-  if (data->result) {
-    err = true;
-    argv[0] = Exception::Error(Nan::New("Error closing database").ToLocalChecked());
-  }
-  else {
+struct CloseJob : public Job<CloseJob, ODBCConnection> {
+  inline void Work(ODBCConnection* conn) {
+    // TODO(bnoordhuis) Check if there are still in-flight statements.
+    conn->Free();
     conn->connected = false;
   }
 
-  Nan::TryCatch try_catch;
-
-  data->conn->Unref();
-  data->cb->Call(err ? 1 : 0, argv);
-
-  if (try_catch.HasCaught()) {
-    FatalException(try_catch);
+  inline void Done(ODBCConnection* conn) {
+    MakeCallback();
   }
 
-  delete data->cb;
+  inline void DoneSync(ODBCConnection* conn,
+                       const Nan::FunctionCallbackInfo<v8::Value>& info) {
+    info.GetReturnValue().Set(true);
+  }
+};
 
-  free(data);
-  free(req);
+NAN_METHOD(ODBCConnection::Close) {
+  static const int kCallbackIndex = 0;
+  CloseJob* that = new(std::nothrow) CloseJob();
+  CloseJob::Async(HERE, info, that, kCallbackIndex);
 }
-
-/*
- * CloseSync
- */
 
 NAN_METHOD(ODBCConnection::CloseSync) {
-  DEBUG_PRINTF("ODBCConnection::CloseSync\n");
-  Nan::HandleScope scope;
-
-  ODBCConnection* conn = Nan::ObjectWrap::Unwrap<ODBCConnection>(info.Holder());
-  
-  //TODO: check to see if there are any open statements
-  //on this connection
-  
-  conn->Free();
-  
-  conn->connected = false;
-
-  info.GetReturnValue().Set(true);
+  CloseJob that;
+  CloseJob::Sync(HERE, info, &that);
 }
 
-/*
- * CreateStatementSync
- * 
- */
+struct CreateStatementJob : public Job<CreateStatementJob, ODBCConnection> {
+  inline void Work(ODBCConnection* conn) {
+    result = SQLAllocHandle(SQL_HANDLE_STMT, conn->m_hDBC, &hSTMT);
+    if (!SQL_SUCCEEDED(result)) RecordSQLError(SQL_HANDLE_DBC, conn->m_hDBC);
+  }
 
-NAN_METHOD(ODBCConnection::CreateStatementSync) {
-  DEBUG_PRINTF("ODBCConnection::CreateStatementSync\n");
-  Nan::HandleScope scope;
+  inline void Done(ODBCConnection* conn) {
+    v8::Local<v8::Value> info[2];
+    if (SQL_SUCCEEDED(result)) {
+      info[0] = Nan::Null();
+      info[1] = NewODBCStatement(conn);
+    } else {
+      info[0] = MakeSQLError();
+      info[1] = Nan::Null();
+    }
+    MakeCallback(arraysize(info), info);
+  }
 
-  ODBCConnection* conn = Nan::ObjectWrap::Unwrap<ODBCConnection>(info.Holder());
-   
+  inline void DoneSync(ODBCConnection* conn,
+                       const Nan::FunctionCallbackInfo<v8::Value>& info) {
+    if (SQL_SUCCEEDED(result)) {
+      info.GetReturnValue().Set(NewODBCStatement(conn));
+    } else {
+      Nan::ThrowError(MakeSQLError());
+    }
+  }
+
+  inline v8::Local<v8::Object> NewODBCStatement(ODBCConnection* conn) {
+    v8::Local<v8::Value> info[3];
+    info[0] = ToExternal(conn->m_hENV);
+    info[1] = ToExternal(conn->m_hDBC);
+    info[2] = ToExternal(hSTMT);
+    return NewInstance(ODBCStatement::constructor, arraysize(info), info);
+  }
+
   SQLHSTMT hSTMT;
-
-  SQLAllocHandle(
-    SQL_HANDLE_STMT, 
-    conn->m_hDBC, 
-    &hSTMT);
-  
-  Local<Value> params[3];
-  params[0] = Nan::New<External>((void*)(intptr_t)conn->m_hENV);
-  params[1] = Nan::New<External>((void*)(intptr_t)conn->m_hDBC);
-  params[2] = Nan::New<External>((void*)(intptr_t)hSTMT);
-  
-  Local<Object> js_result = NewInstance(ODBCStatement::constructor, 3, params);
-  
-  info.GetReturnValue().Set(js_result);
-}
-
-/*
- * CreateStatement
- * 
- */
+  SQLRETURN result;
+};
 
 NAN_METHOD(ODBCConnection::CreateStatement) {
-  DEBUG_PRINTF("ODBCConnection::CreateStatement\n");
-  Nan::HandleScope scope;
-
-  REQ_FUN_ARG(0, cb);
-
-  ODBCConnection* conn = Nan::ObjectWrap::Unwrap<ODBCConnection>(info.Holder());
-    
-  //initialize work request
-  uv_work_t* work_req = (uv_work_t *) (calloc(1, sizeof(uv_work_t)));
-  MEMCHECK( work_req ) ;
-  
-  //initialize our data
-  create_statement_work_data* data = 
-    (create_statement_work_data *) (calloc(1, sizeof(create_statement_work_data)));
-  MEMCHECK( data ) ;
-
-  data->cb = new Nan::Callback(cb);
-  data->conn = conn;
-
-  work_req->data = data;
-  
-  uv_queue_work(
-    uv_default_loop(), 
-    work_req, 
-    UV_CreateStatement, 
-    (uv_after_work_cb)UV_AfterCreateStatement);
-
-  conn->Ref();
-
-  info.GetReturnValue().SetUndefined();
+  static const int kCallbackIndex = 0;
+  CreateStatementJob* that = new(std::nothrow) CreateStatementJob();
+  CreateStatementJob::Async(HERE, info, that, kCallbackIndex);
 }
 
-void ODBCConnection::UV_CreateStatement(uv_work_t* req) {
-  DEBUG_PRINTF("ODBCConnection::UV_CreateStatement\n");
-  
-  //get our work data
-  create_statement_work_data* data = (create_statement_work_data *)(req->data);
-
-  DEBUG_PRINTF("ODBCConnection::UV_CreateStatement m_hDBC=%X m_hDBC=%X m_hSTMT=%X\n",
-    data->conn->m_hENV,
-    data->conn->m_hDBC,
-    data->hSTMT
-  );
-  
-  //allocate a new statment handle
-  SQLAllocHandle( SQL_HANDLE_STMT, 
-                  data->conn->m_hDBC, 
-                  &data->hSTMT);
-
-  DEBUG_PRINTF("ODBCConnection::UV_CreateStatement m_hDBC=%X m_hDBC=%X m_hSTMT=%X\n",
-    data->conn->m_hENV,
-    data->conn->m_hDBC,
-    data->hSTMT
-  );
-}
-
-void ODBCConnection::UV_AfterCreateStatement(uv_work_t* req, int status) {
-  DEBUG_PRINTF("ODBCConnection::UV_AfterCreateStatement\n");
-  Nan::HandleScope scope;
-
-  create_statement_work_data* data = (create_statement_work_data *)(req->data);
-
-  DEBUG_PRINTF("ODBCConnection::UV_AfterCreateStatement m_hDBC=%X m_hDBC=%X hSTMT=%X\n",
-    data->conn->m_hENV,
-    data->conn->m_hDBC,
-    data->hSTMT
-  );
-  
-  Local<Value> info[3];
-  info[0] = Nan::New<External>((void*)(intptr_t)data->conn->m_hENV);
-  info[1] = Nan::New<External>((void*)(intptr_t)data->conn->m_hDBC);
-  info[2] = Nan::New<External>((void*)(intptr_t)data->hSTMT);
-  
-  Local<Object> js_result = NewInstance(ODBCStatement::constructor, 3, info);
-
-  info[0] = Nan::Null();
-  info[1] = js_result;
-
-
-  Nan::TryCatch try_catch;
-
-  data->cb->Call( 2, info);
-
-  if (try_catch.HasCaught()) {
-    FatalException(try_catch);
-  }
-  
-  data->conn->Unref();
-  delete data->cb;
-
-  free(data);
-  free(req);
+NAN_METHOD(ODBCConnection::CreateStatementSync) {
+  CreateStatementJob that;
+  CreateStatementJob::Sync(HERE, info, &that);
 }
 
 /*
@@ -840,12 +512,11 @@ void ODBCConnection::UV_AfterQuery(uv_work_t* req, int status) {
   }
   else {
     Local<Value> info[4];
-    bool* canFreeHandle = new bool(true);
-    
+
     info[0] = Nan::New<External>((void*)(intptr_t)data->conn->m_hENV);
     info[1] = Nan::New<External>((void*)(intptr_t)data->conn->m_hDBC);
     info[2] = Nan::New<External>((void*)(intptr_t)data->hSTMT);
-    info[3] = Nan::New<External>((void*)canFreeHandle);
+    info[3] = Nan::True();
     
     Local<Object> js_result = NewInstance(ODBCResult::constructor, 4, info);
 
@@ -1071,12 +742,11 @@ NAN_METHOD(ODBCConnection::QuerySync) {
   }
   else {
     Local<Value> result[4];
-    bool* canFreeHandle = new bool(true);
-    
+
     result[0] = Nan::New<External>((void*) (intptr_t) conn->m_hENV);
     result[1] = Nan::New<External>((void*) (intptr_t) conn->m_hDBC);
     result[2] = Nan::New<External>((void*) (intptr_t) hSTMT);
-    result[3] = Nan::New<External>((void*)canFreeHandle);
+    result[3] = Nan::True();
     
     Local<Object> js_result = NewInstance(ODBCResult::constructor, 4, result);
 
@@ -1312,130 +982,46 @@ void ODBCConnection::UV_Columns(uv_work_t* req) {
   data->result = ret;
 }
 
-/*
- * BeginTransactionSync
- * 
- */
-
-NAN_METHOD(ODBCConnection::BeginTransactionSync) {
-  DEBUG_PRINTF("ODBCConnection::BeginTransactionSync\n");
-  Nan::HandleScope scope;
-
-  ODBCConnection* conn = Nan::ObjectWrap::Unwrap<ODBCConnection>(info.Holder());
-  
-  SQLRETURN ret;
-
-  //set the connection manual commits
-  ret = SQLSetConnectAttr(
-    conn->m_hDBC,
-    SQL_ATTR_AUTOCOMMIT,
-    (SQLPOINTER) SQL_AUTOCOMMIT_OFF,
-    SQL_NTS);
-  
-  if (!SQL_SUCCEEDED(ret)) {
-    Local<Value> objError = ODBC::GetSQLError(SQL_HANDLE_DBC, conn->m_hDBC);
-    
-    Nan::ThrowError(objError);
-    
-    info.GetReturnValue().Set(false);
+struct BeginTransactionJob : public Job<BeginTransactionJob, ODBCConnection> {
+  inline void Work(ODBCConnection* conn) {
+    SQLPOINTER option_value =
+        reinterpret_cast<SQLPOINTER>(
+            static_cast<uintptr_t>(SQL_AUTOCOMMIT_OFF));
+    result = SQLSetConnectAttr(conn->m_hDBC, SQL_ATTR_AUTOCOMMIT,
+                               option_value, SQL_NO_DATA);
+    if (!SQL_SUCCEEDED(result)) RecordSQLError(SQL_HANDLE_DBC, conn->m_hDBC);
   }
-  
-  info.GetReturnValue().Set(true);
-}
 
-/*
- * BeginTransaction
- * 
- */
+  inline void Done(ODBCConnection* conn) {
+    if (SQL_SUCCEEDED(result)) {
+      MakeCallback();
+    } else {
+      MakeCallback(MakeSQLError());
+    }
+  }
+
+  inline void DoneSync(ODBCConnection* conn,
+                       const Nan::FunctionCallbackInfo<v8::Value>& info) {
+    if (SQL_SUCCEEDED(result)) {
+      info.GetReturnValue().Set(true);
+    } else {
+      Nan::ThrowError(MakeSQLError());
+    }
+  }
+
+  SQLRETURN result;
+};
 
 NAN_METHOD(ODBCConnection::BeginTransaction) {
-  DEBUG_PRINTF("ODBCConnection::BeginTransaction\n");
-  Nan::HandleScope scope;
-
-  REQ_FUN_ARG(0, cb);
-
-  ODBCConnection* conn = Nan::ObjectWrap::Unwrap<ODBCConnection>(info.Holder());
-  
-  uv_work_t* work_req = (uv_work_t *) (calloc(1, sizeof(uv_work_t)));
-  MEMCHECK( work_req ) ;
-  
-  query_work_data* data = 
-    (query_work_data *) calloc(1, sizeof(query_work_data));
-  MEMCHECK( data ) ;
-  
-  data->cb = new Nan::Callback(cb);
-  data->conn = conn;
-  work_req->data = data;
-  
-  uv_queue_work(
-    uv_default_loop(),
-    work_req, 
-    UV_BeginTransaction, 
-    (uv_after_work_cb)UV_AfterBeginTransaction);
-
-  return;
+  static const int kCallbackIndex = 0;
+  BeginTransactionJob* that = new(std::nothrow) BeginTransactionJob();
+  BeginTransactionJob::Async(HERE, info, that, kCallbackIndex);
 }
 
-/*
- * UV_BeginTransaction
- * 
- */
-
-void ODBCConnection::UV_BeginTransaction(uv_work_t* req) {
-  DEBUG_PRINTF("ODBCConnection::UV_BeginTransaction\n");
-  
-  query_work_data* data = (query_work_data *)(req->data);
-  
-  //set the connection manual commits
-  data->result = SQLSetConnectAttr(
-    data->conn->self()->m_hDBC,
-    SQL_ATTR_AUTOCOMMIT,
-    (SQLPOINTER) SQL_AUTOCOMMIT_OFF,
-    SQL_NTS);
+NAN_METHOD(ODBCConnection::BeginTransactionSync) {
+  BeginTransactionJob that;
+  BeginTransactionJob::Sync(HERE, info, &that);
 }
-
-/*
- * UV_AfterBeginTransaction
- * 
- */
-
-void ODBCConnection::UV_AfterBeginTransaction(uv_work_t* req, int status) {
-  DEBUG_PRINTF("ODBCConnection::UV_AfterBeginTransaction\n");
-  Nan::HandleScope scope;
-
-  //TODO: Is this supposed to be of type query_work_data?
-  open_connection_work_data* data = (open_connection_work_data *)(req->data);
-  
-  Local<Value> argv[1];
-  
-  bool err = false;
-
-  if (!SQL_SUCCEEDED(data->result)) {
-    err = true;
-
-    Local<Value> objError = ODBC::GetSQLError(SQL_HANDLE_DBC, data->conn->self()->m_hDBC);
-    
-    argv[0] = objError;
-  }
-
-  Nan::TryCatch try_catch;
-
-  data->cb->Call( err ? 1 : 0, argv);
-
-  if (try_catch.HasCaught()) {
-    FatalException(try_catch);
-  }
-
-  delete data->cb;
-  
-  free(data);
-  free(req);
-}
-
-/*
- * EndTransactionSync
- * 
- */
 
 NAN_METHOD(ODBCConnection::EndTransactionSync) {
   DEBUG_PRINTF("ODBCConnection::EndTransactionSync\n");

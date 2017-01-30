@@ -26,6 +26,10 @@
 #include "odbc_result.h"
 #include "odbc_statement.h"
 
+#include "async-job.h"
+
+#include <new>  // std::nothrow
+
 using namespace v8;
 using namespace node;
 
@@ -127,811 +131,224 @@ NAN_METHOD(ODBCStatement::New) {
   info.GetReturnValue().Set(info.Holder());
 }
 
-/*
- * Execute
- */
+struct ExecuteJob : public Job<ExecuteJob, ODBCStatement> {
+  enum Mode { BIND, EXECUTE, EXECUTE_DIRECT, EXECUTE_NON_QUERY, PREPARE };
+
+  inline explicit ExecuteJob(Mode mode) : mode(mode), sql(Nan::EmptyString()) {
+    assert(mode == BIND || mode == EXECUTE || mode == EXECUTE_NON_QUERY);
+  }
+
+  inline explicit ExecuteJob(Mode mode, v8::Local<v8::String> sql)
+      : mode(mode), sql(sql) {
+    assert(mode == EXECUTE_DIRECT || mode == PREPARE);
+  }
+
+  inline void Work(ODBCStatement* stmt) {
+    if (mode == BIND) {
+      result =
+          ODBC::BindParameters(stmt->m_hSTMT, stmt->params, stmt->paramCount);
+    } else if (mode == EXECUTE || mode == EXECUTE_NON_QUERY) {
+      result = SQLExecute(stmt->m_hSTMT);
+    } else if (mode == EXECUTE_DIRECT) {
+      result = SQLExecDirect(stmt->m_hSTMT, *sql, sql.length());
+    } else if (mode == PREPARE) {
+      result = SQLPrepare(stmt->m_hSTMT, *sql, sql.length());
+    } else {
+      UNREACHABLE();
+    }
+
+    if (!SQL_SUCCEEDED(result)) {
+      RecordSQLError(SQL_HANDLE_STMT, stmt->m_hSTMT);
+    }
+  }
+
+  inline void Done(ODBCStatement* stmt) {
+    if (SQL_SUCCEEDED(result)) {
+      if (mode == BIND || mode == PREPARE) {
+        Local<Value> info[2];
+        info[0] = Nan::Null();
+        info[1] = Nan::True();
+        MakeCallback(arraysize(info), info);
+      } else if (mode == EXECUTE) {
+        v8::Local<v8::Value> info[3];
+        info[0] = Nan::Null();
+        info[1] = NewODBCResult(stmt);
+        info[2] = GetOutputParameters(stmt);
+        if (info[2].IsEmpty()) info[2] = Nan::Null();
+        FREE_PARAMS(stmt->params, stmt->paramCount);
+        MakeCallback(arraysize(info), info);
+      } else if (mode == EXECUTE_DIRECT) {
+        v8::Local<v8::Value> info[2];
+        info[0] = Nan::Null();
+        info[1] = NewODBCResult(stmt);
+        MakeCallback(arraysize(info), info);
+      } else if (mode == EXECUTE_NON_QUERY) {
+        Local<Value> info[2];
+        info[0] = Nan::Null();
+        info[1] = Nan::New<v8::Number>(CountRowsAndClose(stmt));
+        MakeCallback(arraysize(info), info);
+      } else {
+        UNREACHABLE();
+      }
+    } else {
+      if (mode == EXECUTE) FREE_PARAMS(stmt->params, stmt->paramCount);
+      MakeCallback(MakeSQLError());
+    }
+  }
+
+  inline void DoneSync(ODBCStatement* stmt,
+                       const Nan::FunctionCallbackInfo<v8::Value>& info) {
+    if (SQL_SUCCEEDED(result)) {
+      if (mode == BIND || mode == PREPARE) {
+        info.GetReturnValue().Set(true);
+      } else if (mode == EXECUTE) {
+        v8::Local<v8::Object> object = NewODBCResult(stmt);
+        v8::Local<v8::Array> outparams = GetOutputParameters(stmt);
+        if (outparams.IsEmpty()) {
+          info.GetReturnValue().Set(object);
+        } else {
+          v8::Local<v8::Array> rval = Nan::New<v8::Array>(2);
+          rval->Set(0, object);
+          rval->Set(1, outparams);
+          info.GetReturnValue().Set(rval);
+        }
+      } else if (mode == EXECUTE_DIRECT) {
+        info.GetReturnValue().Set(NewODBCResult(stmt));
+      } else if (mode == EXECUTE_NON_QUERY) {
+        info.GetReturnValue().Set(CountRowsAndClose(stmt));
+      } else {
+        UNREACHABLE();
+      }
+    } else {
+      Nan::ThrowError(MakeSQLError());
+    }
+    if (mode == EXECUTE) FREE_PARAMS(stmt->params, stmt->paramCount);
+  }
+
+  inline v8::Local<v8::Array> GetOutputParameters(ODBCStatement* stmt) {
+    assert(mode == EXECUTE);
+    v8::Local<v8::Array> outparams;
+    for (int i = 0; i < stmt->paramCount; i++) {
+      Parameter* param = &stmt->params[i];
+      if (param->paramtype % 2 != 0) {
+        continue;  // Not a stored procedure result.
+      }
+      if (outparams.IsEmpty()) {
+        outparams = Nan::New<v8::Array>();
+      }
+      outparams->Set(outparams->Length(), ODBC::GetOutputParameter(*param));
+    }
+    return outparams;
+  }
+
+  inline SQLLEN CountRowsAndClose(ODBCStatement* stmt) {
+    assert(mode == EXECUTE_NON_QUERY);
+    SQLLEN rows = 0;
+    SQLRETURN ret = SQLRowCount(stmt->m_hSTMT, &rows);
+    if (!SQL_SUCCEEDED(ret)) {
+      rows = 0;
+    }
+    // FIXME(bnoordhuis) What if SQLFreeStmt() errors?
+    SQLFreeStmt(stmt->m_hSTMT, SQL_CLOSE);
+    return rows;
+  }
+
+  inline v8::Local<v8::Object> NewODBCResult(ODBCStatement* stmt) {
+    assert(mode == EXECUTE || mode == EXECUTE_NON_QUERY);
+    v8::Local<v8::Value> info[4];
+    info[0] = ToExternal(stmt->m_hENV);
+    info[1] = ToExternal(stmt->m_hDBC);
+    info[2] = ToExternal(stmt->m_hSTMT);
+    info[3] = Nan::False();
+    return NewInstance(ODBCConnection::constructor, arraysize(info), info);
+  }
+
+  const Mode mode;
+#ifdef UNICODE  // FIXME(bnoordhuis) Retain std::nothrow behavior on OOM?
+  v8::String::Value sql;
+#else
+  Nan::Utf8String sql;
+#endif
+  SQLRETURN result;
+};
 
 NAN_METHOD(ODBCStatement::Execute) {
-  DEBUG_PRINTF("ODBCStatement::Execute\n");
-  
-  Nan::HandleScope scope;
-
-  REQ_FUN_ARG(0, cb);
-
-  ODBCStatement* stmt = Nan::ObjectWrap::Unwrap<ODBCStatement>(info.Holder());
-  
-  uv_work_t* work_req = (uv_work_t *) (calloc(1, sizeof(uv_work_t)));
-  MEMCHECK( work_req );
-  
-  execute_work_data* data = 
-    (execute_work_data *) calloc(1, sizeof(execute_work_data));
-  MEMCHECK( data );
-
-  data->cb = new Nan::Callback(cb);
-  
-  data->stmt = stmt;
-  work_req->data = data;
-  
-  uv_queue_work(
-    uv_default_loop(),
-    work_req,
-    UV_Execute,
-    (uv_after_work_cb)UV_AfterExecute);
-
-  stmt->Ref();
-
-  info.GetReturnValue().SetUndefined();
+  static const int kCallbackIndex = 0;
+  ExecuteJob* that = new(std::nothrow) ExecuteJob(ExecuteJob::EXECUTE);
+  ExecuteJob::Async(HERE, info, that, kCallbackIndex);
 }
-
-void ODBCStatement::UV_Execute(uv_work_t* req) {
-  DEBUG_PRINTF("ODBCStatement::UV_Execute\n");
-  
-  execute_work_data* data = (execute_work_data *)(req->data);
-
-  SQLRETURN ret;
-  
-  ret = SQLExecute(data->stmt->m_hSTMT); 
-
-  data->result = ret;
-}
-
-void ODBCStatement::UV_AfterExecute(uv_work_t* req, int status) {
-  DEBUG_PRINTF("ODBCStatement::UV_AfterExecute\n");
-  
-  execute_work_data* data = (execute_work_data *)(req->data);
-  Nan::HandleScope scope;
-  int outParamCount = 0; // Non-zero tells its a SP with OUT param
-  Local<Array> sp_result = Nan::New<Array>();
-  
-  //an easy reference to the statment object
-  ODBCStatement* stmt = data->stmt->self();
-
-  if (SQL_SUCCEEDED( data->result )) {
-    for(int i = 0; i < stmt->paramCount; i++) { // For stored Procedure CALL
-      if(stmt->params[i].paramtype % 2 == 0) {
-        sp_result->Set(Nan::New(outParamCount), ODBC::GetOutputParameter(stmt->params[i]));
-        outParamCount++;
-      }
-    }
-  }
-  if( stmt->paramCount ) {
-    FREE_PARAMS( stmt->params, stmt->paramCount ) ;
-  }
-  
-  //First thing, let's check if the execution of the query returned any errors 
-  if(data->result == SQL_ERROR) {
-    ODBC::CallbackSQLError(
-      SQL_HANDLE_STMT,
-      stmt->m_hSTMT,
-      data->cb);
-  }
-  else {
-    Local<Value> info[4];
-    bool* canFreeHandle = new bool(false);
-    
-    info[0] = Nan::New<External>((void*) (intptr_t) stmt->m_hENV);
-    info[1] = Nan::New<External>((void*) (intptr_t) stmt->m_hDBC);
-    info[2] = Nan::New<External>((void*) (intptr_t) stmt->m_hSTMT);
-    info[3] = Nan::New<External>((void*)canFreeHandle);
-    
-    Local<Object> js_result = NewInstance(ODBCResult::constructor, 4, info);
-
-    info[0] = Nan::Null();
-    info[1] = js_result;
-
-    if(outParamCount) {
-        info[2] = sp_result; // Must a CALL stmt
-    }
-    else info[2] = Nan::Null();
-
-    Nan::TryCatch try_catch;
-
-    data->cb->Call(3, info);
-
-    if (try_catch.HasCaught()) {
-      FatalException(try_catch);
-    }
-  }
-
-  stmt->Unref();
-  delete data->cb;
-  
-  free(data);
-  free(req);
-}
-
-/*
- * ExecuteSync
- * 
- */
 
 NAN_METHOD(ODBCStatement::ExecuteSync) {
-  DEBUG_PRINTF("ODBCStatement::ExecuteSync\n");
-  
-  Nan::HandleScope scope;
-
-  ODBCStatement* stmt = Nan::ObjectWrap::Unwrap<ODBCStatement>(info.Holder());
-  int outParamCount = 0;
-  Local<Array> sp_result = Nan::New<Array>();
-
-  SQLRETURN ret = SQLExecute(stmt->m_hSTMT); 
-
-  if (SQL_SUCCEEDED(ret)) {
-    for(int i = 0; i < stmt->paramCount; i++) { // For stored Procedure CALL
-      if(stmt->params[i].paramtype % 2 == 0) {
-        sp_result->Set(Nan::New(outParamCount), ODBC::GetOutputParameter(stmt->params[i]));
-        outParamCount++;
-      }
-    }
-  }
-  if( stmt->paramCount ) {
-    FREE_PARAMS( stmt->params, stmt->paramCount ) ;
-  }
-  
-  if(ret == SQL_ERROR) {
-    Nan::ThrowError(ODBC::GetSQLError(
-      SQL_HANDLE_STMT,
-      stmt->m_hSTMT,
-      (char *) "[node-odbc] Error in ODBCStatement::ExecuteSync"
-    ));
-    
-    info.GetReturnValue().SetNull();
-  }
-  else {
-    Local<Value> result[4];
-    bool* canFreeHandle = new bool(false);
-    
-    result[0] = Nan::New<External>((void*) (intptr_t) stmt->m_hENV);
-    result[1] = Nan::New<External>((void*) (intptr_t) stmt->m_hDBC);
-    result[2] = Nan::New<External>((void*) (intptr_t) stmt->m_hSTMT);
-    result[3] = Nan::New<External>((void*)canFreeHandle);
-    
-    Local<Object> js_result = NewInstance(ODBCResult::constructor, 4, result);
-
-    if( outParamCount ) // Its a CALL stmt with OUT params.
-    {   // Return an array with outparams as second element. [result, outparams]
-        Local<Array> resultset = Nan::New<Array>();
-        resultset->Set(0, js_result);
-        resultset->Set(1, sp_result);
-        info.GetReturnValue().Set(resultset);
-    }
-    else
-        info.GetReturnValue().Set(js_result);
-  }
+  ExecuteJob that(ExecuteJob::EXECUTE);
+  ExecuteJob::Sync(HERE, info, &that);
 }
-
-/*
- * ExecuteNonQuery
- */
 
 NAN_METHOD(ODBCStatement::ExecuteNonQuery) {
-  DEBUG_PRINTF("ODBCStatement::ExecuteNonQuery\n");
-  
-  Nan::HandleScope scope;
-
-  REQ_FUN_ARG(0, cb);
-
-  ODBCStatement* stmt = Nan::ObjectWrap::Unwrap<ODBCStatement>(info.Holder());
-  
-  uv_work_t* work_req = (uv_work_t *) (calloc(1, sizeof(uv_work_t)));
-  MEMCHECK( work_req );
-  
-  execute_work_data* data = 
-    (execute_work_data *) calloc(1, sizeof(execute_work_data));
-  MEMCHECK( data );
-
-  data->cb = new Nan::Callback(cb);
-  
-  data->stmt = stmt;
-  work_req->data = data;
-  
-  uv_queue_work(
-    uv_default_loop(),
-    work_req,
-    UV_ExecuteNonQuery,
-    (uv_after_work_cb)UV_AfterExecuteNonQuery);
-
-  stmt->Ref();
-  
-  info.GetReturnValue().SetUndefined();
+  static const int kCallbackIndex = 0;
+  ExecuteJob* that =
+      new(std::nothrow) ExecuteJob(ExecuteJob::EXECUTE_NON_QUERY);
+  ExecuteJob::Async(HERE, info, that, kCallbackIndex);
 }
-
-void ODBCStatement::UV_ExecuteNonQuery(uv_work_t* req) {
-  DEBUG_PRINTF("ODBCStatement::ExecuteNonQuery\n");
-  
-  execute_work_data* data = (execute_work_data *)(req->data);
-
-  SQLRETURN ret;
-  
-  ret = SQLExecute(data->stmt->m_hSTMT); 
-
-  data->result = ret;
-}
-
-void ODBCStatement::UV_AfterExecuteNonQuery(uv_work_t* req, int status) {
-  DEBUG_PRINTF("ODBCStatement::ExecuteNonQuery\n");
-  
-  execute_work_data* data = (execute_work_data *)(req->data);
-  
-  Nan::HandleScope scope;
-  
-  //an easy reference to the statment object
-  ODBCStatement* self = data->stmt->self();
-
-  //First thing, let's check if the execution of the query returned any errors 
-  if(data->result == SQL_ERROR) {
-    ODBC::CallbackSQLError(
-      SQL_HANDLE_STMT,
-      self->m_hSTMT,
-      data->cb);
-  }
-  else {
-    SQLLEN rowCount = 0;
-    
-    SQLRETURN ret = SQLRowCount(self->m_hSTMT, &rowCount);
-    
-    if (!SQL_SUCCEEDED(ret)) {
-      rowCount = 0;
-    }
-    
-    SQLFreeStmt(self->m_hSTMT, SQL_CLOSE);
-    
-    Local<Value> info[2];
-
-    info[0] = Nan::Null();
-    info[1] = Nan::New<Number>(rowCount);
-
-    Nan::TryCatch try_catch;
-    
-    data->cb->Call(Nan::GetCurrentContext()->Global(), 2, info);
-
-    if (try_catch.HasCaught()) {
-      FatalException(try_catch);
-    }
-  }
-
-  self->Unref();
-  delete data->cb;
-  
-  free(data);
-  free(req);
-}
-
-/*
- * ExecuteNonQuerySync
- * 
- */
 
 NAN_METHOD(ODBCStatement::ExecuteNonQuerySync) {
-  DEBUG_PRINTF("ODBCStatement::ExecuteNonQuerySync\n");
-  
-  Nan::HandleScope scope;
-
-  ODBCStatement* stmt = Nan::ObjectWrap::Unwrap<ODBCStatement>(info.Holder());
-
-  SQLRETURN ret = SQLExecute(stmt->m_hSTMT); 
-  
-  if(ret == SQL_ERROR) {
-    Nan::ThrowError(ODBC::GetSQLError(
-      SQL_HANDLE_STMT,
-      stmt->m_hSTMT,
-      (char *) "[node-odbc] Error in ODBCStatement::ExecuteSync"
-    ));
-    
-    info.GetReturnValue().SetNull();
-  }
-  else {
-    SQLLEN rowCount = 0;
-    
-    SQLRETURN ret = SQLRowCount(stmt->m_hSTMT, &rowCount);
-    
-    if (!SQL_SUCCEEDED(ret)) {
-      rowCount = 0;
-    }
-    
-    SQLFreeStmt(stmt->m_hSTMT, SQL_CLOSE);
-    
-    info.GetReturnValue().Set(rowCount);
-  }
+  ExecuteJob that(ExecuteJob::EXECUTE_NON_QUERY);
+  ExecuteJob::Sync(HERE, info, &that);
 }
-
-/*
- * ExecuteDirect
- * 
- */
 
 NAN_METHOD(ODBCStatement::ExecuteDirect) {
-  DEBUG_PRINTF("ODBCStatement::ExecuteDirect\n");
-  
-  Nan::HandleScope scope;
-
   REQ_STRO_ARG(0, sql);
-  REQ_FUN_ARG(1, cb);
-
-  ODBCStatement* stmt = Nan::ObjectWrap::Unwrap<ODBCStatement>(info.Holder());
-  
-  uv_work_t* work_req = (uv_work_t *) (calloc(1, sizeof(uv_work_t)));
-  MEMCHECK( work_req );
-  
-  execute_direct_work_data* data = 
-    (execute_direct_work_data *) calloc(1, sizeof(execute_direct_work_data));
-  MEMCHECK( data );
-
-  data->cb = new Nan::Callback(cb);
-
-  data->sqlLen = sql->Length();
-
-#ifdef UNICODE
-  data->sql = (uint16_t *) malloc((data->sqlLen * sizeof(uint16_t)) + sizeof(uint16_t));
-  MEMCHECK( data->sql );
-  sql->Write((uint16_t *) data->sql);
-#else
-  data->sql = (char *) malloc(data->sqlLen +1);
-  MEMCHECK( data->sql );
-  sql->WriteUtf8((char *) data->sql);
-#endif
-
-  data->stmt = stmt;
-  work_req->data = data;
-  
-  uv_queue_work(
-    uv_default_loop(),
-    work_req, 
-    UV_ExecuteDirect, 
-    (uv_after_work_cb)UV_AfterExecuteDirect);
-
-  stmt->Ref();
-
-  info.GetReturnValue().SetUndefined();
+  static const int kCallbackIndex = 1;
+  ExecuteJob* that =
+      new(std::nothrow) ExecuteJob(ExecuteJob::EXECUTE_DIRECT, sql);
+  ExecuteJob::Async(HERE, info, that, kCallbackIndex);
 }
-
-void ODBCStatement::UV_ExecuteDirect(uv_work_t* req) {
-  DEBUG_PRINTF("ODBCStatement::UV_ExecuteDirect\n");
-  
-  execute_direct_work_data* data = (execute_direct_work_data *)(req->data);
-
-  SQLRETURN ret;
-  
-  ret = SQLExecDirect(
-    data->stmt->m_hSTMT,
-    (SQLTCHAR *) data->sql, 
-    data->sqlLen);  
-
-  data->result = ret;
-}
-
-void ODBCStatement::UV_AfterExecuteDirect(uv_work_t* req, int status) {
-  DEBUG_PRINTF("ODBCStatement::UV_AfterExecuteDirect\n");
-  
-  execute_direct_work_data* data = (execute_direct_work_data *)(req->data);
-  
-  Nan::HandleScope scope;
-  
-  //an easy reference to the statment object
-  ODBCStatement* self = data->stmt->self();
-
-  //First thing, let's check if the execution of the query returned any errors 
-  if(data->result == SQL_ERROR) {
-    ODBC::CallbackSQLError(
-      SQL_HANDLE_STMT,
-      self->m_hSTMT,
-      data->cb);
-  }
-  else {
-    Local<Value> info[4];
-    bool* canFreeHandle = new bool(false);
-    
-    info[0] = Nan::New<External>((void*) (intptr_t) self->m_hENV);
-    info[1] = Nan::New<External>((void*) (intptr_t) self->m_hDBC);
-    info[2] = Nan::New<External>((void*) (intptr_t) self->m_hSTMT);
-    info[3] = Nan::New<External>((void*)canFreeHandle);
-    
-    //TODO persistent leak?
-    Nan::Persistent<Object> js_result;
-    js_result.Reset(NewInstance(ODBCResult::constructor, 4, info));
-
-    info[0] = Nan::Null();
-    info[1] = Nan::New(js_result);
-
-    Nan::TryCatch try_catch;
-
-    data->cb->Call(2, info);
-
-    if (try_catch.HasCaught()) {
-      FatalException(try_catch);
-    }
-  }
-
-  self->Unref();
-  delete data->cb;
-  
-  free(data->sql);
-  free(data);
-  free(req);
-}
-
-/*
- * ExecuteDirectSync
- * 
- */
 
 NAN_METHOD(ODBCStatement::ExecuteDirectSync) {
-  DEBUG_PRINTF("ODBCStatement::ExecuteDirectSync\n");
-  
-  Nan::HandleScope scope;
-
-#ifdef UNICODE
-  REQ_WSTR_ARG(0, sql);
-#else
-  REQ_STR_ARG(0, sql);
-#endif
-
-  ODBCStatement* stmt = Nan::ObjectWrap::Unwrap<ODBCStatement>(info.Holder());
-  
-  SQLRETURN ret = SQLExecDirect(
-    stmt->m_hSTMT,
-    (SQLTCHAR *) *sql, 
-    sql.length());  
-
-  if(ret == SQL_ERROR) {
-    Nan::ThrowError(ODBC::GetSQLError(
-      SQL_HANDLE_STMT,
-      stmt->m_hSTMT,
-      (char *) "[node-odbc] Error in ODBCStatement::ExecuteDirectSync"
-    ));
-    
-    info.GetReturnValue().SetNull();
-  }
-  else {
-   Local<Value> result[4];
-    bool* canFreeHandle = new bool(false);
-    
-    result[0] = Nan::New<External>((void*) (intptr_t) stmt->m_hENV);
-    result[1] = Nan::New<External>((void*) (intptr_t) stmt->m_hDBC);
-    result[2] = Nan::New<External>((void*) (intptr_t) stmt->m_hSTMT);
-    result[3] = Nan::New<External>((void*)canFreeHandle);
-    
-    //TODO persistent leak?
-    Nan::Persistent<Object> js_result;
-    js_result.Reset(NewInstance(ODBCResult::constructor, 4, result));
-    
-    info.GetReturnValue().Set(Nan::New(js_result));
-  }
-}
-
-/*
- * PrepareSync
- * 
- */
-
-NAN_METHOD(ODBCStatement::PrepareSync) {
-  DEBUG_PRINTF("ODBCStatement::PrepareSync\n");
-  
-  Nan::HandleScope scope;
-
   REQ_STRO_ARG(0, sql);
-
-  ODBCStatement* stmt = Nan::ObjectWrap::Unwrap<ODBCStatement>(info.Holder());
-
-  SQLRETURN ret;
-
-  int sqlLen = sql->Length() + 1;
-
-#ifdef UNICODE
-  uint16_t *sql2;
-  sql2 = (uint16_t *) malloc(sqlLen * sizeof(uint16_t));
-  MEMCHECK( sql2 );
-  sql->Write(sql2);
-#else
-  char *sql2;
-  sql2 = (char *) malloc(sqlLen);
-  MEMCHECK( sql2 );
-  sql->WriteUtf8(sql2);
-#endif
-  
-  ret = SQLPrepare(
-    stmt->m_hSTMT,
-    (SQLTCHAR *) sql2, 
-    sqlLen);
-  
-  if (SQL_SUCCEEDED(ret)) {
-    info.GetReturnValue().Set(true);
-  }
-  else {
-    Nan::ThrowError(ODBC::GetSQLError(
-      SQL_HANDLE_STMT,
-      stmt->m_hSTMT,
-      (char *) "[node-odbc] Error in ODBCStatement::PrepareSync"
-    ));
-
-    info.GetReturnValue().Set(false);
-  }
+  ExecuteJob that(ExecuteJob::EXECUTE_DIRECT, sql);
+  ExecuteJob::Sync(HERE, info, &that);
 }
-
-/*
- * Prepare
- * 
- */
 
 NAN_METHOD(ODBCStatement::Prepare) {
-  DEBUG_PRINTF("ODBCStatement::Prepare\n");
-  
-  Nan::HandleScope scope;
-
   REQ_STRO_ARG(0, sql);
-  REQ_FUN_ARG(1, cb);
-
-  ODBCStatement* stmt = Nan::ObjectWrap::Unwrap<ODBCStatement>(info.Holder());
-  
-  uv_work_t* work_req = (uv_work_t *) (calloc(1, sizeof(uv_work_t)));
-  MEMCHECK( work_req );
-  
-  prepare_work_data* data = 
-    (prepare_work_data *) calloc(1, sizeof(prepare_work_data));
-  MEMCHECK( data );
-
-  data->cb = new Nan::Callback(cb);
-
-  data->sqlLen = sql->Length();
-
-#ifdef UNICODE
-  data->sql = (uint16_t *) malloc((data->sqlLen * sizeof(uint16_t)) + sizeof(uint16_t));
-  MEMCHECK( data->sql );
-  sql->Write((uint16_t *) data->sql);
-#else
-  data->sql = (char *) malloc(data->sqlLen +1);
-  MEMCHECK( data->sql );
-  sql->WriteUtf8((char *) data->sql);
-#endif
-  
-  data->stmt = stmt;
-  
-  work_req->data = data;
-  
-  uv_queue_work(
-    uv_default_loop(), 
-    work_req, 
-    UV_Prepare, 
-    (uv_after_work_cb)UV_AfterPrepare);
-
-  stmt->Ref();
-
-  info.GetReturnValue().SetUndefined();
+  static const int kCallbackIndex = 1;
+  ExecuteJob* that = new(std::nothrow) ExecuteJob(ExecuteJob::PREPARE, sql);
+  ExecuteJob::Async(HERE, info, that, kCallbackIndex);
 }
 
-void ODBCStatement::UV_Prepare(uv_work_t* req) {
-  DEBUG_PRINTF("ODBCStatement::UV_Prepare\n");
-  
-  prepare_work_data* data = (prepare_work_data *)(req->data);
-
-  DEBUG_PRINTF("ODBCStatement::UV_Prepare m_hDBC=%X m_hDBC=%X m_hSTMT=%X\n",
-    data->stmt->m_hENV,
-    data->stmt->m_hDBC,
-    data->stmt->m_hSTMT
-  );
-  
-  SQLRETURN ret;
-  
-  ret = SQLPrepare(
-    data->stmt->m_hSTMT,
-    (SQLTCHAR *) data->sql, 
-    data->sqlLen);
-
-  data->result = ret;
+NAN_METHOD(ODBCStatement::PrepareSync) {
+  REQ_STRO_ARG(0, sql);
+  ExecuteJob that(ExecuteJob::PREPARE, sql);
+  ExecuteJob::Sync(HERE, info, &that);
 }
 
-void ODBCStatement::UV_AfterPrepare(uv_work_t* req, int status) {
-  DEBUG_PRINTF("ODBCStatement::UV_AfterPrepare\n");
-  
-  prepare_work_data* data = (prepare_work_data *)(req->data);
-  
-  DEBUG_PRINTF("ODBCStatement::UV_AfterPrepare m_hDBC=%X m_hDBC=%X m_hSTMT=%X\n",
-    data->stmt->m_hENV,
-    data->stmt->m_hDBC,
-    data->stmt->m_hSTMT
-  );
-  
-  Nan::HandleScope scope;
-
-  //First thing, let's check if the execution of the query returned any errors 
-  if(data->result == SQL_ERROR) {
-    ODBC::CallbackSQLError(
-      SQL_HANDLE_STMT,
-      data->stmt->m_hSTMT,
-      data->cb);
-  }
-  else {
-    Local<Value> info[2];
-
-    info[0] = Nan::Null();
-    info[1] = Nan::True();
-
-    Nan::TryCatch try_catch;
-
-    data->cb->Call( 2, info);
-
-    if (try_catch.HasCaught()) {
-      FatalException(try_catch);
-    }
-  }
-  
-  data->stmt->Unref();
-  delete data->cb;
-  
-  free(data->sql);
-  free(data);
-  free(req);
-}
-
-/*
- * BindSync
- * 
- */
-
-NAN_METHOD(ODBCStatement::BindSync) 
-{
-  DEBUG_PRINTF("ODBCStatement::BindSync\n");
-  Nan::HandleScope scope;
-
-  if ( !info[0]->IsArray() ) {
-    return Nan::ThrowTypeError("Argument 1 must be an Array");
+inline bool CloneBindParams(const Nan::FunctionCallbackInfo<v8::Value>& info) {
+  if (!info[0]->IsArray()) {
+    Nan::ThrowTypeError("Argument 1 must be an Array");
+    return false;
   }
   ODBCStatement* stmt = Nan::ObjectWrap::Unwrap<ODBCStatement>(info.Holder());
-  
-  DEBUG_PRINTF("ODBCStatement::BindSync m_hDBC=%X m_hDBC=%X m_hSTMT=%X\n",
-    stmt->m_hENV,
-    stmt->m_hDBC,
-    stmt->m_hSTMT
-  );
-  
-  //if we previously had parameters, then be sure to free them
-  //before allocating more
-  if (stmt->paramCount) {
-      FREE_PARAMS( stmt->params, stmt->paramCount ) ;
-  }
-  
-  stmt->params = ODBC::GetParametersFromArray(
-    Local<Array>::Cast(info[0]), 
-    &stmt->paramCount);
-  
-  SQLRETURN ret = SQL_SUCCESS;
-
-  ret = ODBC::BindParameters( stmt->m_hSTMT, stmt->params, stmt->paramCount ) ;
-
-  if (SQL_SUCCEEDED(ret)) {
-    info.GetReturnValue().Set(true);
-  }
-  else {
-    Nan::ThrowError(ODBC::GetSQLError(
-      SQL_HANDLE_STMT,
-      stmt->m_hSTMT,
-      (char *) "[node-odbc] Error in ODBCStatement::BindSync"
-    ));
-    
-    info.GetReturnValue().Set(false);
-  }
+  FREE_PARAMS(stmt->params, stmt->paramCount);
+  stmt->params =
+      ODBC::GetParametersFromArray(info[0].As<v8::Array>(), &stmt->paramCount);
+  return true;
 }
-
-/*
- * Bind
- * 
- */
 
 NAN_METHOD(ODBCStatement::Bind) {
-  DEBUG_PRINTF("ODBCStatement::Bind\n");
-  
-  Nan::HandleScope scope;
-
-  if ( !info[0]->IsArray() ) {
-    return Nan::ThrowError("Argument 1 must be an Array");
-  }
-  
-  REQ_FUN_ARG(1, cb);
-
-  ODBCStatement* stmt = Nan::ObjectWrap::Unwrap<ODBCStatement>(info.Holder());
-  
-  uv_work_t* work_req = (uv_work_t *) (calloc(1, sizeof(uv_work_t)));
-  MEMCHECK( work_req );
-  
-  bind_work_data* data = 
-    (bind_work_data *) calloc(1, sizeof(bind_work_data));
-  MEMCHECK( data );
-
-  //if we previously had parameters, then be sure to free them
-  //before allocating more
-  if (stmt->paramCount) {
-      FREE_PARAMS( stmt->params, stmt->paramCount ) ;
-  }
-  
-  data->stmt = stmt;
-  
-  DEBUG_PRINTF("ODBCStatement::Bind m_hDBC=%X m_hDBC=%X m_hSTMT=%X\n",
-    data->stmt->m_hENV,
-    data->stmt->m_hDBC,
-    data->stmt->m_hSTMT
-  );
-  
-  data->cb = new Nan::Callback(cb);
-  
-  data->stmt->params = ODBC::GetParametersFromArray(
-    Local<Array>::Cast(info[0]), 
-    &data->stmt->paramCount);
-  
-  work_req->data = data;
-  
-  uv_queue_work(
-    uv_default_loop(), 
-    work_req, 
-    UV_Bind, 
-    (uv_after_work_cb)UV_AfterBind);
-
-  stmt->Ref();
-
-  info.GetReturnValue().SetUndefined();
+  if (!CloneBindParams(info)) return;
+  static const int kCallbackIndex = 1;
+  ExecuteJob* that = new(std::nothrow) ExecuteJob(ExecuteJob::BIND);
+  ExecuteJob::Async(HERE, info, that, kCallbackIndex);
 }
 
-void ODBCStatement::UV_Bind(uv_work_t* req) {
-  DEBUG_PRINTF("ODBCStatement::UV_Bind\n");
-  
-  bind_work_data* data = (bind_work_data *)(req->data);
-
-  DEBUG_PRINTF("ODBCStatement::UV_Bind m_hDBC=%X m_hDBC=%X m_hSTMT=%X\n",
-    data->stmt->m_hENV,
-    data->stmt->m_hDBC,
-    data->stmt->m_hSTMT
-  );
-  
-  data->result = ODBC::BindParameters( data->stmt->m_hSTMT, 
-                 data->stmt->params, data->stmt->paramCount ) ;
+NAN_METHOD(ODBCStatement::BindSync) {
+  if (!CloneBindParams(info)) return;
+  ExecuteJob that(ExecuteJob::BIND);
+  ExecuteJob::Sync(HERE, info, &that);
 }
-
-void ODBCStatement::UV_AfterBind(uv_work_t* req, int status) {
-  DEBUG_PRINTF("ODBCStatement::UV_AfterBind\n");
-  
-  bind_work_data* data = (bind_work_data *)(req->data);
-  
-  Nan::HandleScope scope;
-  
-  //an easy reference to the statment object
-  ODBCStatement* self = data->stmt->self();
-
-  //Check if there were errors 
-  if(data->result == SQL_ERROR) {
-    ODBC::CallbackSQLError(
-      SQL_HANDLE_STMT,
-      self->m_hSTMT,
-      data->cb);
-  }
-  else {
-    Local<Value> info[2];
-
-    info[0] = Nan::Null();
-    info[1] = Nan::True();
-
-    Nan::TryCatch try_catch;
-
-    data->cb->Call( 2, info);
-
-    if (try_catch.HasCaught()) {
-      FatalException(try_catch);
-    }
-  }
-
-  self->Unref();
-  delete data->cb;
-  
-  free(data);
-  free(req);
-}
-
-/*
- * CloseSync
- */
 
 NAN_METHOD(ODBCStatement::CloseSync) {
   DEBUG_PRINTF("ODBCStatement::CloseSync\n");
-  
-  Nan::HandleScope scope;
 
   OPT_INT_ARG(0, closeOption, SQL_DESTROY);
   

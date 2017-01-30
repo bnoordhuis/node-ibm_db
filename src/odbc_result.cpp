@@ -93,15 +93,15 @@ NAN_METHOD(ODBCResult::New) {
   REQ_EXT_ARG(0, js_henv);
   REQ_EXT_ARG(1, js_hdbc);
   REQ_EXT_ARG(2, js_hstmt);
-  REQ_EXT_ARG(3, js_canFreeHandle);
+  REQ_BOOL_ARG(3, js_canFreeHandle);
+  bool canFreeHandle = js_canFreeHandle->BooleanValue();
   
   SQLHENV hENV = static_cast<SQLHENV>((intptr_t)js_henv->Value());
   SQLHDBC hDBC = static_cast<SQLHDBC>((intptr_t)js_hdbc->Value());
   SQLHSTMT hSTMT = static_cast<SQLHSTMT>((intptr_t)js_hstmt->Value());
-  bool* canFreeHandle = static_cast<bool *>(js_canFreeHandle->Value());
   
   //create a new OBCResult object
-  ODBCResult* objODBCResult = new ODBCResult(hENV, hDBC, hSTMT, *canFreeHandle);
+  ODBCResult* objODBCResult = new ODBCResult(hENV, hDBC, hSTMT, canFreeHandle);
   
   DEBUG_PRINTF("ODBCResult::New m_hENV=%X m_hDBC=%X m_hSTMT=%X canFreeHandle=%X\n",
     objODBCResult->m_hENV,
@@ -110,9 +110,6 @@ NAN_METHOD(ODBCResult::New) {
     objODBCResult->m_canFreeHandle
   );
   
-  //free the pointer to canFreeHandle
-  delete canFreeHandle;
-
   //specify the buffer length
   objODBCResult->bufferLength = MAX_VALUE_SIZE;
   

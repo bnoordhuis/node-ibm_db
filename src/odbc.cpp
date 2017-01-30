@@ -31,6 +31,10 @@
 #include "strptime.h"
 #endif
 
+#include "async-job.h"
+
+#include <new>  // std::nothrow
+
 #define FILE_PARAM 3
 
 using namespace v8;
@@ -114,117 +118,53 @@ NAN_METHOD(ODBC::New) {
   info.GetReturnValue().Set(info.Holder());
 }
 
-/*
- * CreateConnection
- */
+struct CreateConnectionJob : public Job<CreateConnectionJob, ODBC> {
+  inline void Work(ODBC* dbo) {
+    result = SQLAllocHandle(SQL_HANDLE_DBC, dbo->m_hEnv, &hDBC);
+    if (!SQL_SUCCEEDED(result)) RecordSQLError(SQL_HANDLE_ENV, dbo->m_hEnv);
+  }
+
+  inline void Done(ODBC* dbo) {
+    v8::Local<v8::Value> info[2];
+    if (SQL_SUCCEEDED(result)) {
+      info[0] = Nan::Null();
+      info[1] = NewODBCConnection(dbo);
+    } else {
+      info[0] = MakeSQLError();
+      info[1] = Nan::Null();
+    }
+    MakeCallback(arraysize(info), info);
+  }
+
+  inline void DoneSync(ODBC* dbo,
+                       const Nan::FunctionCallbackInfo<v8::Value>& info) {
+    if (SQL_SUCCEEDED(result)) {
+      info.GetReturnValue().Set(NewODBCConnection(dbo));
+    } else {
+      Nan::ThrowError(MakeSQLError());
+    }
+  }
+
+  inline v8::Local<v8::Object> NewODBCConnection(ODBC* dbo) {
+    v8::Local<v8::Value> info[2];
+    info[0] = ToExternal(dbo->m_hEnv);
+    info[1] = ToExternal(hDBC);
+    return NewInstance(ODBCConnection::constructor, arraysize(info), info);
+  }
+
+  SQLHDBC hDBC;
+  SQLRETURN result;
+};
 
 NAN_METHOD(ODBC::CreateConnection) {
-  DEBUG_PRINTF("ODBC::CreateConnection\n");
-  Nan::HandleScope scope;
-
-  Local<Function> cb = info[0].As<Function>();
-  Nan::Callback *callback = new Nan::Callback(cb);
-  //REQ_FUN_ARG(0, cb);
-
-  ODBC* dbo = Nan::ObjectWrap::Unwrap<ODBC>(info.Holder());
-  
-  //initialize work request
-  uv_work_t* work_req = (uv_work_t *) (calloc(1, sizeof(uv_work_t)));
-  MEMCHECK( work_req );
-  
-  //initialize our data
-  create_connection_work_data* data = 
-    (create_connection_work_data *) (calloc(1, sizeof(create_connection_work_data)));
-  MEMCHECK( data );
-
-  data->cb = callback;
-  data->dbo = dbo;
-
-  work_req->data = data;
-  
-  uv_queue_work(uv_default_loop(), work_req, UV_CreateConnection, (uv_after_work_cb)UV_AfterCreateConnection);
-
-  dbo->Ref();
-
-  info.GetReturnValue().SetUndefined();
+  static const int kCallbackIndex = 0;
+  CreateConnectionJob* that = new(std::nothrow) CreateConnectionJob();
+  CreateConnectionJob::Async(HERE, info, that, kCallbackIndex);
 }
-
-void ODBC::UV_CreateConnection(uv_work_t* req) {
-  DEBUG_PRINTF("ODBC::UV_CreateConnection\n");
-  
-  //get our work data
-  create_connection_work_data* data = (create_connection_work_data *)(req->data);
-  
-  //allocate a new connection handle
-  data->result = SQLAllocHandle(SQL_HANDLE_DBC, data->dbo->m_hEnv, &data->hDBC);
-}
-
-void ODBC::UV_AfterCreateConnection(uv_work_t* req, int status) {
-  DEBUG_PRINTF("ODBC::UV_AfterCreateConnection\n");
-  Nan::HandleScope scope;
-
-  create_connection_work_data* data = (create_connection_work_data *)(req->data);
-  
-  Nan::TryCatch try_catch;
-  
-  if (!SQL_SUCCEEDED(data->result)) {
-    Local<Value> info[1];
-    
-    info[0] = ODBC::GetSQLError(SQL_HANDLE_ENV, data->dbo->m_hEnv);
-    
-    data->cb->Call(1, info);
-  }
-  else {
-    Local<Value> info[2];
-    info[0] = Nan::New<External>((void*)(intptr_t)data->dbo->m_hEnv);
-    info[1] = Nan::New<External>((void*)(intptr_t)data->hDBC);
-    
-    Local<Object> js_result = NewInstance(ODBCConnection::constructor, 2, info);
-
-    info[0] = Nan::Null();
-    info[1] = js_result;
-
-    data->cb->Call(2, info);
-  }
-  
-  if (try_catch.HasCaught()) {
-      Nan::FatalException(try_catch);
-  }
-
-  
-  data->dbo->Unref();
-  delete data->cb;
-
-  free(data);
-  free(req);
-}
-
-/*
- * CreateConnectionSync
- */
 
 NAN_METHOD(ODBC::CreateConnectionSync) {
-  DEBUG_PRINTF("ODBC::CreateConnectionSync\n");
-  Nan::HandleScope scope;
-
-  ODBC* dbo = Nan::ObjectWrap::Unwrap<ODBC>(info.Holder());
-   
-  SQLHDBC hDBC;
-  
-  //allocate a new connection handle
-  SQLRETURN ret = SQLAllocHandle(SQL_HANDLE_DBC, dbo->m_hEnv, &hDBC);
-  
-  if (!SQL_SUCCEEDED(ret)) {
-    //TODO: do something!
-  }
-  
-  Local<Value> params[2];
-  params[0] = Nan::New<External>((void*)(intptr_t)dbo->m_hEnv);
-  params[1] = Nan::New<External>((void*)(intptr_t)hDBC);
-
-  Local<Object> js_result = NewInstance(ODBCConnection::constructor, 2, params);
-
-  info.GetReturnValue().Set(js_result);
+  CreateConnectionJob that;
+  CreateConnectionJob::Sync(HERE, info, &that);
 }
 
 /*

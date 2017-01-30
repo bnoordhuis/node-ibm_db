@@ -18,6 +18,7 @@
 #ifndef _SRC_ODBC_H
 #define _SRC_ODBC_H
 
+#include <uv.h>
 #include <v8.h>
 #include <node.h>
 #include <nan.h>
@@ -40,6 +41,7 @@ using namespace node;
 
 // Free Bind Parameters 
 #define FREE_PARAMS( params, count )                                 \
+  do {                                                               \
     Parameter prm;                                                   \
     if(params != NULL ) {                                            \
       for (int i = 0; i < count; i++) {                              \
@@ -57,7 +59,8 @@ using namespace node;
       free(params);                                                  \
     }                                                                \
     params = NULL;                                                   \
-    count = 0;
+    count = 0;                                                       \
+  } while (0)
 
 // two macros ensures that any macro used will be expanded 
 // before being stringified. #x gives string value of x.
@@ -130,8 +133,6 @@ class ODBC : public Nan::ObjectWrap {
 
     //async methods
     static NAN_METHOD(CreateConnection);
-    static void UV_CreateConnection(uv_work_t* work_req);
-    static void UV_AfterCreateConnection(uv_work_t* work_req, int status);
     
     //sync methods
     static NAN_METHOD(CreateConnectionSync);
@@ -139,43 +140,9 @@ class ODBC : public Nan::ObjectWrap {
     ODBC *self(void) { return this; }
 
   protected:
+    friend struct CreateConnectionJob;
+
     SQLHENV m_hEnv;
-};
-
-struct create_connection_work_data {
-  Nan::Callback* cb;
-  ODBC *dbo;
-  SQLHDBC hDBC;
-  int result;
-};
-
-struct open_request {
-  Nan::Persistent<Function> cb;
-  ODBC *dbo;
-  int result;
-  char connection[1];
-};
-
-struct close_request {
-  Nan::Persistent<Function> cb;
-  ODBC *dbo;
-  int result;
-};
-
-struct query_request {
-  Nan::Persistent<Function> cb;
-  ODBC *dbo;
-  SQLHSTMT hSTMT;
-  int affectedRows;
-  char *sql;
-  char *catalog;
-  char *schema;
-  char *table;
-  char *type;
-  char *column;
-  Parameter *params;
-  int  paramCount;
-  int result;
 };
 
 #ifdef UNICODE
@@ -277,6 +244,14 @@ NewInstance(const Nan::Persistent<v8::Function>& constructor,
             int argc, v8::Local<v8::Value> argv[]) {
   v8::Local<v8::Function> f = Nan::New<v8::Function>(constructor);
   return Nan::NewInstance(f, argc, argv).ToLocalChecked();
+}
+
+inline v8::Local<v8::External> ToExternal(void* that) {
+  return Nan::New<v8::External>(that);
+}
+
+inline v8::Local<v8::External> ToExternal(SQLINTEGER that) {
+  return ToExternal(reinterpret_cast<void*>(static_cast<uintptr_t>(that)));
 }
 
 }  // namespace anonymous

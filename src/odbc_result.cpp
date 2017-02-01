@@ -689,11 +689,11 @@ NAN_METHOD(ODBCResult::CloseSync) {
   else if (closeOption == SQL_DESTROY && !result->m_canFreeHandle) {
     //We technically can't free the handle so, we'll SQL_CLOSE
     SQLFreeStmt(result->m_hSTMT, SQL_CLOSE);
-    result->m_canFreeHandle = new bool(true);
+    result->m_canFreeHandle = true;
   }
   else {
     SQLFreeStmt(result->m_hSTMT, closeOption);
-    result->m_canFreeHandle = new bool(true);
+    result->m_canFreeHandle = true;
   }
   
   info.GetReturnValue().Set(true);

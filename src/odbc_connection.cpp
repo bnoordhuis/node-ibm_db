@@ -1061,22 +1061,30 @@ NAN_METHOD(ODBCConnection::BeginTransactionSync) {
   TransactionJob::Sync(HERE, info, &that);
 }
 
-inline TransactionJob::Kind ToTransactionKind(v8::Local<v8::Value> value) {
-  if (value->BooleanValue()) {
-    return TransactionJob::ROLLBACK_TRANSACTION;
+inline bool ToKind(v8::Local<v8::Value> value, TransactionJob::Kind* kind) {
+  Nan::Maybe<bool> maybe_bool = Nan::To<bool>(value);
+  if (maybe_bool.IsNothing()) {
+    return false;  // Exception pending.
   }
-  return TransactionJob::COMMIT_TRANSACTION;
+  if (maybe_bool.FromJust()) {
+    *kind = TransactionJob::ROLLBACK_TRANSACTION;
+  } else {
+    *kind = TransactionJob::COMMIT_TRANSACTION;
+  }
+  return true;
 }
 
 NAN_METHOD(ODBCConnection::EndTransaction) {
   static const int kCallbackIndex = 1;
-  const TransactionJob::Kind kind = ToTransactionKind(info[0]);
+  TransactionJob::Kind kind;
+  if (!ToKind(info[0], &kind)) return;  // Exception pending.
   TransactionJob* that = new(std::nothrow) TransactionJob(kind);
   TransactionJob::Async(HERE, info, that, kCallbackIndex);
 }
 
 NAN_METHOD(ODBCConnection::EndTransactionSync) {
-  const TransactionJob::Kind kind = ToTransactionKind(info[0]);
+  TransactionJob::Kind kind;
+  if (!ToKind(info[0], &kind)) return;  // Exception pending.
   TransactionJob that(kind);
   TransactionJob::Sync(HERE, info, &that);
 }
@@ -1087,7 +1095,9 @@ NAN_METHOD(ODBCConnection::SetIsolationLevel) {
   if (info.Length() == 0) {
     isolation_level = SQL_TXN_READ_COMMITTED;
   } else if (info[0]->IsInt32()) {
-    isolation_level = info[0]->Int32Value();
+    Nan::Maybe<int32_t> maybe_isolation_level = Nan::To<int32_t>(info[0]);
+    if (maybe_isolation_level.IsNothing()) return;  // Exception pending.
+    isolation_level = maybe_isolation_level.FromJust();
   } else {
     return Nan::ThrowTypeError("Argument 0 must be an integer");
   }

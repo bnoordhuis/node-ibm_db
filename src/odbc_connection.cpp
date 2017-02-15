@@ -983,33 +983,39 @@ void ODBCConnection::UV_Columns(uv_work_t* req) {
 }
 
 struct TransactionJob : public Job<TransactionJob, ODBCConnection> {
-  enum Kind { BEGIN_TRANSACTION, COMMIT_TRANSACTION, ROLLBACK_TRANSACTION };
+  enum Kind {
+    BEGIN_TRANSACTION,
+    COMMIT_TRANSACTION,
+    ROLLBACK_TRANSACTION,
+    SET_ISOLATION_LEVEL
+  };
 
-  inline explicit TransactionJob(Kind kind) : kind(kind) {}
+  inline explicit TransactionJob(Kind kind)
+      : kind(kind), isolation_level() {}
+
+  inline TransactionJob(Kind kind, int isolation_level)
+      : kind(kind), isolation_level(isolation_level) {
+    assert(kind == SET_ISOLATION_LEVEL);
+  }
 
   inline void Work(ODBCConnection* conn) {
     if (kind == BEGIN_TRANSACTION) {
-      SQLPOINTER option_value =
-          reinterpret_cast<SQLPOINTER>(
-              static_cast<uintptr_t>(SQL_AUTOCOMMIT_OFF));
-      result = SQLSetConnectAttr(conn->m_hDBC, SQL_ATTR_AUTOCOMMIT,
-                                 option_value, SQL_NO_DATA);
+      result = SetAttribute(conn, SQL_ATTR_AUTOCOMMIT, SQL_AUTOCOMMIT_OFF);
       if (!SQL_SUCCEEDED(result)) RecordSQLError(SQL_HANDLE_DBC, conn->m_hDBC);
     } else if (kind == COMMIT_TRANSACTION || kind == ROLLBACK_TRANSACTION) {
       SQLSMALLINT completion_type =
           (kind == COMMIT_TRANSACTION ? SQL_COMMIT : SQL_ROLLBACK);
       result = SQLEndTran(SQL_HANDLE_DBC, conn->m_hDBC, completion_type);
       if (!SQL_SUCCEEDED(result)) RecordSQLError(SQL_HANDLE_DBC, conn->m_hDBC);
-      SQLPOINTER option_value =
-          reinterpret_cast<SQLPOINTER>(
-              static_cast<uintptr_t>(SQL_AUTOCOMMIT_ON));
       SQLRETURN temp_result =
-          SQLSetConnectAttr(conn->m_hDBC, SQL_ATTR_AUTOCOMMIT,
-                            option_value, SQL_NO_DATA);
+          SetAttribute(conn, SQL_ATTR_AUTOCOMMIT, SQL_AUTOCOMMIT_ON);
       if (SQL_SUCCEEDED(result) && !SQL_SUCCEEDED(temp_result)) {
         RecordSQLError(SQL_HANDLE_DBC, conn->m_hDBC);
         result = temp_result;
       }
+    } else if (kind == SET_ISOLATION_LEVEL) {
+      result = SetAttribute(conn, SQL_ATTR_TXN_ISOLATION, isolation_level);
+      if (!SQL_SUCCEEDED(result)) RecordSQLError(SQL_HANDLE_DBC, conn->m_hDBC);
     } else {
       UNREACHABLE();
     }
@@ -1032,7 +1038,14 @@ struct TransactionJob : public Job<TransactionJob, ODBCConnection> {
     }
   }
 
+  inline SQLRETURN SetAttribute(ODBCConnection* conn, int option, int value) {
+    SQLPOINTER value_p =
+        reinterpret_cast<SQLPOINTER>(static_cast<uintptr_t>(value));
+    return SQLSetConnectAttr(conn->m_hDBC, option, value_p, SQL_NO_DATA);
+  }
+
   const Kind kind;
+  const int isolation_level;
   SQLRETURN result;
 };
 
@@ -1048,7 +1061,7 @@ NAN_METHOD(ODBCConnection::BeginTransactionSync) {
   TransactionJob::Sync(HERE, info, &that);
 }
 
-inline TransactionJob::Kind ToKind(v8::Local<v8::Value> value) {
+inline TransactionJob::Kind ToTransactionKind(v8::Local<v8::Value> value) {
   if (value->BooleanValue()) {
     return TransactionJob::ROLLBACK_TRANSACTION;
   }
@@ -1057,57 +1070,27 @@ inline TransactionJob::Kind ToKind(v8::Local<v8::Value> value) {
 
 NAN_METHOD(ODBCConnection::EndTransaction) {
   static const int kCallbackIndex = 1;
-  const TransactionJob::Kind kind = ToKind(info[0]);
+  const TransactionJob::Kind kind = ToTransactionKind(info[0]);
   TransactionJob* that = new(std::nothrow) TransactionJob(kind);
   TransactionJob::Async(HERE, info, that, kCallbackIndex);
 }
 
 NAN_METHOD(ODBCConnection::EndTransactionSync) {
-  const TransactionJob::Kind kind = ToKind(info[0]);
+  const TransactionJob::Kind kind = ToTransactionKind(info[0]);
   TransactionJob that(kind);
   TransactionJob::Sync(HERE, info, &that);
 }
 
-/*
- * SetIsolationLevel
- * 
- */
-
+// TODO(bnoordhuis) Should SetIsolationLevel() have an async counterpart?
 NAN_METHOD(ODBCConnection::SetIsolationLevel) {
-  DEBUG_PRINTF("ODBCConnection::SetIsolationLevel\n");
-  Nan::HandleScope scope;
-
-  ODBCConnection* conn = Nan::ObjectWrap::Unwrap<ODBCConnection>(info.Holder());
-
-  OPT_INT_ARG(0, isolationLevel, SQL_TXN_READ_COMMITTED)
-
-  Local<Value> objError;
-  SQLRETURN ret;
-  bool error = false;
-
-  //set the connection manual commits
-  ret = SQLSetConnectAttr(
-    conn->m_hDBC,
-    SQL_ATTR_TXN_ISOLATION,
-    (SQLPOINTER) isolationLevel,
-    SQL_NTS);
-
-  DEBUG_PRINTF("ODBCConnection::SetIsolationLevel isolationLevel=%i; ret=%d\n",
-               isolationLevel, ret);
-
-  //check how the transaction went
-  if (!SQL_SUCCEEDED(ret)) {
-    error = true;
-
-    objError = ODBC::GetSQLError(SQL_HANDLE_DBC, conn->m_hDBC);
+  int isolation_level;
+  if (info.Length() == 0) {
+    isolation_level = SQL_TXN_READ_COMMITTED;
+  } else if (info[0]->IsInt32()) {
+    isolation_level = info[0]->Int32Value();
+  } else {
+    return Nan::ThrowTypeError("Argument 0 must be an integer");
   }
-
-  if (error) {
-    Nan::ThrowError(objError);
-
-    info.GetReturnValue().Set(false);
-  }
-  else {
-    info.GetReturnValue().Set(true);
-  }
+  TransactionJob that(TransactionJob::SET_ISOLATION_LEVEL, isolation_level);
+  TransactionJob::Sync(HERE, info, &that);
 }

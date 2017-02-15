@@ -51,12 +51,7 @@ class ODBCConnection : public Nan::ObjectWrap {
 
     //async methods
     static NAN_METHOD(BeginTransaction);
-
     static NAN_METHOD(EndTransaction);
-    static void UV_EndTransaction(uv_work_t* work_req);
-    static void UV_AfterEndTransaction(uv_work_t* work_req, int status);
-    
-    
     static NAN_METHOD(Open);
     static NAN_METHOD(Close);
     static NAN_METHOD(CreateStatement);
@@ -88,6 +83,7 @@ class ODBCConnection : public Nan::ObjectWrap {
     friend struct CloseJob;
     friend struct CreateStatementJob;
     friend struct OpenJob;
+    friend struct TransactionJob;
 
     SQLHENV m_hENV;
     SQLHDBC m_hDBC;

@@ -982,14 +982,37 @@ void ODBCConnection::UV_Columns(uv_work_t* req) {
   data->result = ret;
 }
 
-struct BeginTransactionJob : public Job<BeginTransactionJob, ODBCConnection> {
+struct TransactionJob : public Job<TransactionJob, ODBCConnection> {
+  enum Kind { BEGIN_TRANSACTION, COMMIT_TRANSACTION, ROLLBACK_TRANSACTION };
+
+  inline explicit TransactionJob(Kind kind) : kind(kind) {}
+
   inline void Work(ODBCConnection* conn) {
-    SQLPOINTER option_value =
-        reinterpret_cast<SQLPOINTER>(
-            static_cast<uintptr_t>(SQL_AUTOCOMMIT_OFF));
-    result = SQLSetConnectAttr(conn->m_hDBC, SQL_ATTR_AUTOCOMMIT,
-                               option_value, SQL_NO_DATA);
-    if (!SQL_SUCCEEDED(result)) RecordSQLError(SQL_HANDLE_DBC, conn->m_hDBC);
+    if (kind == BEGIN_TRANSACTION) {
+      SQLPOINTER option_value =
+          reinterpret_cast<SQLPOINTER>(
+              static_cast<uintptr_t>(SQL_AUTOCOMMIT_OFF));
+      result = SQLSetConnectAttr(conn->m_hDBC, SQL_ATTR_AUTOCOMMIT,
+                                 option_value, SQL_NO_DATA);
+      if (!SQL_SUCCEEDED(result)) RecordSQLError(SQL_HANDLE_DBC, conn->m_hDBC);
+    } else if (kind == COMMIT_TRANSACTION || kind == ROLLBACK_TRANSACTION) {
+      SQLSMALLINT completion_type =
+          (kind == COMMIT_TRANSACTION ? SQL_COMMIT : SQL_ROLLBACK);
+      result = SQLEndTran(SQL_HANDLE_DBC, conn->m_hDBC, completion_type);
+      if (!SQL_SUCCEEDED(result)) RecordSQLError(SQL_HANDLE_DBC, conn->m_hDBC);
+      SQLPOINTER option_value =
+          reinterpret_cast<SQLPOINTER>(
+              static_cast<uintptr_t>(SQL_AUTOCOMMIT_ON));
+      SQLRETURN temp_result =
+          SQLSetConnectAttr(conn->m_hDBC, SQL_ATTR_AUTOCOMMIT,
+                            option_value, SQL_NO_DATA);
+      if (SQL_SUCCEEDED(result) && !SQL_SUCCEEDED(temp_result)) {
+        RecordSQLError(SQL_HANDLE_DBC, conn->m_hDBC);
+        result = temp_result;
+      }
+    } else {
+      UNREACHABLE();
+    }
   }
 
   inline void Done(ODBCConnection* conn) {
@@ -1009,190 +1032,40 @@ struct BeginTransactionJob : public Job<BeginTransactionJob, ODBCConnection> {
     }
   }
 
+  const Kind kind;
   SQLRETURN result;
 };
 
 NAN_METHOD(ODBCConnection::BeginTransaction) {
   static const int kCallbackIndex = 0;
-  BeginTransactionJob* that = new(std::nothrow) BeginTransactionJob();
-  BeginTransactionJob::Async(HERE, info, that, kCallbackIndex);
+  TransactionJob* that =
+      new(std::nothrow) TransactionJob(TransactionJob::BEGIN_TRANSACTION);
+  TransactionJob::Async(HERE, info, that, kCallbackIndex);
 }
 
 NAN_METHOD(ODBCConnection::BeginTransactionSync) {
-  BeginTransactionJob that;
-  BeginTransactionJob::Sync(HERE, info, &that);
+  TransactionJob that(TransactionJob::BEGIN_TRANSACTION);
+  TransactionJob::Sync(HERE, info, &that);
+}
+
+inline TransactionJob::Kind ToKind(v8::Local<v8::Value> value) {
+  if (value->BooleanValue()) {
+    return TransactionJob::ROLLBACK_TRANSACTION;
+  }
+  return TransactionJob::COMMIT_TRANSACTION;
+}
+
+NAN_METHOD(ODBCConnection::EndTransaction) {
+  static const int kCallbackIndex = 1;
+  const TransactionJob::Kind kind = ToKind(info[0]);
+  TransactionJob* that = new(std::nothrow) TransactionJob(kind);
+  TransactionJob::Async(HERE, info, that, kCallbackIndex);
 }
 
 NAN_METHOD(ODBCConnection::EndTransactionSync) {
-  DEBUG_PRINTF("ODBCConnection::EndTransactionSync\n");
-  Nan::HandleScope scope;
-
-  ODBCConnection* conn = Nan::ObjectWrap::Unwrap<ODBCConnection>(info.Holder());
-  
-  REQ_BOOL_ARG(0, rollback);
-  
-  Local<Value> objError;
-  SQLRETURN ret;
-  bool error = false;
-  SQLSMALLINT completionType = (rollback->Value()) 
-    ? SQL_ROLLBACK
-    : SQL_COMMIT
-    ;
-  
-  //Call SQLEndTran
-  ret = SQLEndTran(
-    SQL_HANDLE_DBC,
-    conn->m_hDBC,
-    completionType);
-  
-  //check how the transaction went
-  if (!SQL_SUCCEEDED(ret)) {
-    error = true;
-    
-    objError = ODBC::GetSQLError(SQL_HANDLE_DBC, conn->m_hDBC);
-  }
-  
-  //Reset the connection back to autocommit
-  ret = SQLSetConnectAttr(
-    conn->m_hDBC,
-    SQL_ATTR_AUTOCOMMIT,
-    (SQLPOINTER) SQL_AUTOCOMMIT_ON,
-    SQL_NTS);
-  
-  //check how setting the connection attr went
-  //but only process the code if an error has not already
-  //occurred. If an error occurred during SQLEndTran,
-  //that is the error that we want to throw.
-  if (!SQL_SUCCEEDED(ret) && !error) {
-    //TODO: if this also failed, we really should
-    //be restarting the connection or something to deal with this state
-    error = true;
-    
-    objError = ODBC::GetSQLError(SQL_HANDLE_DBC, conn->m_hDBC);
-  }
-  
-  if (error) {
-    Nan::ThrowError(objError);
-    
-    info.GetReturnValue().Set(false);
-  }
-  else {
-    info.GetReturnValue().Set(true);
-  }
-}
-
-/*
- * EndTransaction
- * 
- */
-
-NAN_METHOD(ODBCConnection::EndTransaction) {
-  DEBUG_PRINTF("ODBCConnection::EndTransaction\n");
-  Nan::HandleScope scope;
-
-  REQ_BOOL_ARG(0, rollback);
-  REQ_FUN_ARG(1, cb);
-
-  ODBCConnection* conn = Nan::ObjectWrap::Unwrap<ODBCConnection>(info.Holder());
-  
-  uv_work_t* work_req = (uv_work_t *) (calloc(1, sizeof(uv_work_t)));
-  MEMCHECK( work_req ) ;
-  
-  query_work_data* data = 
-    (query_work_data *) calloc(1, sizeof(query_work_data));
-  MEMCHECK( data ) ;
-  
-  data->completionType = (rollback->Value()) 
-    ? SQL_ROLLBACK
-    : SQL_COMMIT
-    ;
-  data->cb = new Nan::Callback(cb);
-  data->conn = conn;
-  work_req->data = data;
-  
-  uv_queue_work(
-    uv_default_loop(),
-    work_req, 
-    UV_EndTransaction, 
-    (uv_after_work_cb)UV_AfterEndTransaction);
-
-  info.GetReturnValue().SetUndefined();
-}
-
-/*
- * UV_EndTransaction
- * 
- */
-
-void ODBCConnection::UV_EndTransaction(uv_work_t* req) {
-  DEBUG_PRINTF("ODBCConnection::UV_EndTransaction\n");
-  
-  query_work_data* data = (query_work_data *)(req->data);
-  
-  bool err = false;
-  
-  //Call SQLEndTran
-  SQLRETURN ret = SQLEndTran(
-    SQL_HANDLE_DBC,
-    data->conn->m_hDBC,
-    data->completionType);
-  
-  data->result = ret;
-  
-  if (!SQL_SUCCEEDED(ret)) {
-    err = true;
-  }
-  
-  //Reset the connection back to autocommit
-  ret = SQLSetConnectAttr(
-    data->conn->m_hDBC,
-    SQL_ATTR_AUTOCOMMIT,
-    (SQLPOINTER) SQL_AUTOCOMMIT_ON,
-    SQL_NTS);
-  
-  if (!SQL_SUCCEEDED(ret) && !err) {
-    //there was not an earlier error,
-    //so we shall pass the return code from
-    //this last call.
-    data->result = ret;
-  }
-}
-
-/*
- * UV_AfterEndTransaction
- * 
- */
-
-void ODBCConnection::UV_AfterEndTransaction(uv_work_t* req, int status) {
-  DEBUG_PRINTF("ODBCConnection::UV_AfterEndTransaction\n");
-  Nan::HandleScope scope;
-  
-  open_connection_work_data* data = (open_connection_work_data *)(req->data);
-  
-  Local<Value> argv[1];
-  
-  bool err = false;
-
-  if (!SQL_SUCCEEDED(data->result)) {
-    err = true;
-
-    Local<Value> objError = ODBC::GetSQLError(SQL_HANDLE_DBC, data->conn->self()->m_hDBC);
-    
-    argv[0] = objError;
-  }
-
-  Nan::TryCatch try_catch;
-
-  data->cb->Call(err ? 1 : 0, argv);
-
-  if (try_catch.HasCaught()) {
-    FatalException(try_catch);
-  }
-
-  delete data->cb;
-  
-  free(data);
-  free(req);
+  const TransactionJob::Kind kind = ToKind(info[0]);
+  TransactionJob that(kind);
+  TransactionJob::Sync(HERE, info, &that);
 }
 
 /*
